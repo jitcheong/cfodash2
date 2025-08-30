@@ -1,6 +1,6 @@
 # app.py
 # Requirements: pandas>=2.2, streamlit>=1.36, openpyxl>=3.1.2
-# Optional charts: plotly>=5
+# Optional: plotly>=5 for charts
 import argparse
 import os
 import re
@@ -20,7 +20,7 @@ COMMENTARY_DB = "commentary.db"
 MARGIN_HINTS = {"GM%", "EBITDA%", "Opex%"}
 MARGIN_UNITS = {"%", "pts", "pt"}
 
-# Priority rules (broadened P2)
+# Priority rules (P1/P2/P3)
 PRIORITY_RULES = [
     # P1 — topline / profit / cash
     (re.compile(r'^(revenue|sales|net\s*revenue)$', re.I), "P1"),
@@ -28,7 +28,6 @@ PRIORITY_RULES = [
     (re.compile(r'^ebitda(\s*%)?$', re.I), "P1"),
     (re.compile(r'^\s*dso\s*$', re.I), "P1"),
     (re.compile(r'^(capex|capital\s*exp)', re.I), "P1"),
-
     # P2 — efficiency & spend discipline
     (re.compile(r'^(opex|op\s*ex|operating\s*exp(ense|s)?)(\s*%|\s*ratio|\s*/\s*rev(enue)?)?$', re.I), "P2"),
     (re.compile(r'^(sg&?a|sga|selling\s*&\s*general\s*&\s*admin(istration)?)', re.I), "P2"),
@@ -38,7 +37,6 @@ PRIORITY_RULES = [
     (re.compile(r'^(bookings|billings|arr|mrr)$', re.I), "P2"),
 ]
 
-
 def priority_of(metric: str) -> str:
     name = (metric or "").strip()
     for pat, p in PRIORITY_RULES:
@@ -46,12 +44,10 @@ def priority_of(metric: str) -> str:
             return p
     return "P3"
 
-
 # Colors
 DARK_GREEN = "#006400"
 RED = "#C00000"
 GREY = "#9CA3AF"
-
 
 # ----------------------------
 # DB init & schema evolve
@@ -98,13 +94,11 @@ def init_dbs() -> None:
         if "accepted" not in cols["name"].tolist():
             conn.execute("ALTER TABLE commentary ADD COLUMN accepted INTEGER DEFAULT 0")
 
-
 # ----------------------------
 # Helpers
 # ----------------------------
 def _true_month_end(date_obj: datetime) -> str:
     return (date_obj + MonthEnd(0)).strftime("%Y-%m-%d")
-
 
 def parse_filename(filename: str) -> Tuple[str, str]:
     """
@@ -119,17 +113,14 @@ def parse_filename(filename: str) -> Tuple[str, str]:
     mon = datetime.strptime(m.group("mon").title(), "%b%Y")
     return market, _true_month_end(mon)
 
-
 def _read_excel_or_fail(io_obj):
     try:
         return pd.read_excel(io_obj, engine="openpyxl")
     except ImportError as e:
         raise RuntimeError("Excel engine missing. Install it: pip install openpyxl") from e
 
-
 def _strip_nullable(s: pd.Series) -> pd.Series:
     return s.apply(lambda v: v.strip() if isinstance(v, str) else v)
-
 
 def _fmt_value(val, unit):
     if pd.isna(val) or val is None:
@@ -141,14 +132,14 @@ def _fmt_value(val, unit):
         return f"{val:.2f} {u}"
     return f"{val:.2f}"
 
-
 def _fmt_delta(val: float, unit) -> str:
+    if val is None or pd.isna(val):
+        return "-"
     if isinstance(unit, str) and unit.strip() in ("%", "pts", "pt"):
         return f"{val:.2f} pp"
     if isinstance(unit, str) and unit.strip():
         return f"{val:.2f} {unit.strip()}"
     return f"{val:.2f}"
-
 
 def _is_margin(metric: str, unit: Optional[str]) -> bool:
     if metric in MARGIN_HINTS:
@@ -157,11 +148,9 @@ def _is_margin(metric: str, unit: Optional[str]) -> bool:
         return True
     return False
 
-
 # Business-sense coloring (DSO lower is better)
 def is_better_when_lower(metric: str) -> bool:
     return bool(re.fullmatch(r'\s*dso\s*', (metric or ''), flags=re.I))
-
 
 def color_for_delta(metric: str, delta: Optional[float]) -> str:
     if delta is None or pd.isna(delta):
@@ -171,78 +160,6 @@ def color_for_delta(metric: str, delta: Optional[float]) -> str:
         return DARK_GREEN if d < 0 else RED if d > 0 else GREY
     else:
         return DARK_GREEN if d > 0 else RED if d < 0 else GREY
-def _safe_pct(diff: Optional[float], base: Optional[float]) -> Optional[float]:
-    if diff is None or pd.isna(diff) or base is None or pd.isna(base) or base == 0:
-        return None
-    return 100.0 * float(diff) / float(base)
-
-def _metric_snapshot(df_slice: pd.DataFrame, metric: str):
-    """Return dict of act, vs_bud, vs_ly, ytd_act, ytd_vs_bud, unit and formatted strings."""
-    sub = df_slice[df_slice["metric"] == metric]
-    if sub.empty:
-        return {}
-    unit = sub["unit"].dropna().iloc[0] if not sub["unit"].dropna().empty else None
-    act = sub[(sub["scope"] == "ITM") & (sub["basis"] == "Act")]["value"]
-    bud = sub[(sub["scope"] == "ITM") & (sub["basis"] == "vs BUD")]["value"]
-    ly  = sub[(sub["scope"] == "ITM") & (sub["basis"] == "vs n-1")]["value"]
-    ytd_act = sub[(sub["scope"] == "YTD") & (sub["basis"] == "Act")]["value"]
-    ytd_bud = sub[(sub["scope"] == "YTD") & (sub["basis"] == "vs BUD")]["value"]
-
-    act_v = float(act.iloc[0]) if not act.empty else None
-    bud_v = float(bud.iloc[0]) if not bud.empty else None
-    ly_v  = float(ly.iloc[0])  if not ly.empty  else None
-    ytd_act_v = float(ytd_act.iloc[0]) if not ytd_act.empty else None
-    ytd_bud_v = float(ytd_bud.iloc[0]) if not ytd_bud.empty else None
-
-    # Reconstruct baselines: Budget = Act - (Act-Bud), LY = Act - (Act-LY)
-    budget_base = act_v - bud_v if (act_v is not None and bud_v is not None) else None
-    ly_base     = act_v - ly_v  if (act_v is not None and ly_v  is not None) else None
-    ytd_budget_base = ytd_act_v - ytd_bud_v if (ytd_act_v is not None and ytd_bud_v is not None) else None
-
-    return {
-        "unit": unit,
-        "act": act_v,
-        "vs_bud": bud_v,
-        "vs_ly": ly_v,
-        "ytd_act": ytd_act_v,
-        "ytd_vs_bud": ytd_bud_v,
-        "budget_base": budget_base,
-        "ly_base": ly_base,
-        "ytd_budget_base": ytd_budget_base,
-        # formatted strings
-        "act_fmt": _fmt_value(act_v, unit),
-        "vs_bud_fmt": _fmt_delta(bud_v, unit) if bud_v is not None else None,
-        "vs_ly_fmt": _fmt_delta(ly_v, unit) if ly_v is not None else None,
-        "ytd_vs_bud_fmt": _fmt_delta(ytd_bud_v, unit) if ytd_bud_v is not None else None,
-    }
-
-def build_deviation_table(df_slice: pd.DataFrame, metrics: List[str]) -> pd.DataFrame:
-    """
-    Returns a table with % deviations vs Budget, vs LY, YTD vs BUD for each metric.
-    % = delta / baseline reconstructed from Act and delta.
-    """
-    rows = []
-    for m in metrics:
-        snap = _metric_snapshot(df_slice, m)
-        if not snap:
-            continue
-        pct_bud = _safe_pct(snap["vs_bud"], snap["budget_base"])
-        pct_ly  = _safe_pct(snap["vs_ly"], snap["ly_base"])
-        pct_ytd = _safe_pct(snap["ytd_vs_bud"], snap["ytd_budget_base"])
-        # For coloring we use the original deltas (business-sense for DSO)
-        rows.append({
-            "metric": m,
-            "unit": snap["unit"],
-            "pct_vs_bud": pct_bud,
-            "pct_vs_ly": pct_ly,
-            "pct_ytd_vs_bud": pct_ytd,
-            "delta_vs_bud": snap["vs_bud"],
-            "delta_vs_ly": snap["vs_ly"],
-            "delta_ytd_vs_bud": snap["ytd_vs_bud"],
-            "max_abs_pct": max([abs(x) for x in [pct_bud, pct_ly, pct_ytd] if x is not None], default=None),
-        })
-    return pd.DataFrame(rows)
-
 
 # ----------------------------
 # Excel ingestion
@@ -266,7 +183,6 @@ def _allowed_map(cols: List[str]) -> dict:
                 scope = m.group(2).upper()
         out[c0] = (scope, basis)
     return out
-
 
 def _tidy_from_dataframe(df: pd.DataFrame, market: str, month_end: str) -> pd.DataFrame:
     df = df.copy()
@@ -296,18 +212,15 @@ def _tidy_from_dataframe(df: pd.DataFrame, market: str, month_end: str) -> pd.Da
     )
     return m[key_cols + ["value"]]
 
-
 def ingest_excel_path(path: str) -> pd.DataFrame:
     market, month_end = parse_filename(path)
     df_raw = _read_excel_or_fail(path)
     return _tidy_from_dataframe(df_raw, market, month_end)
 
-
 def ingest_excel_upload(file_obj, original_name: str) -> pd.DataFrame:
     market, month_end = parse_filename(original_name)
     df_raw = _read_excel_or_fail(file_obj)
     return _tidy_from_dataframe(df_raw, market, month_end)
-
 
 # ----------------------------
 # Storage
@@ -318,7 +231,6 @@ def store_financials(df: pd.DataFrame) -> None:
         df.sort_values(key_cols + ["value"])
           .drop_duplicates(subset=key_cols, keep="last")
     )
-    # Replace that market+month completely to avoid UNIQUE issues
     pairs = df2[["market", "month_end"]].drop_duplicates().itertuples(index=False, name=None)
     with sqlite3.connect(FINANCE_DB) as conn:
         cur = conn.cursor()
@@ -327,7 +239,6 @@ def store_financials(df: pd.DataFrame) -> None:
         conn.commit()
         df2.to_sql("financials", conn, if_exists="append", index=False)
 
-
 # ----------------------------
 # Data APIs
 # ----------------------------
@@ -335,7 +246,6 @@ def get_markets() -> List[str]:
     with sqlite3.connect(FINANCE_DB) as conn:
         df = pd.read_sql("SELECT DISTINCT market FROM financials ORDER BY market", conn)
     return df["market"].dropna().tolist()
-
 
 def get_months_for_markets(markets: List[str]) -> List[str]:
     if not markets:
@@ -348,7 +258,6 @@ def get_months_for_markets(markets: List[str]) -> List[str]:
         )
     return df["month_end"].dropna().tolist()
 
-
 def get_slice(market: str, month_end: str) -> pd.DataFrame:
     with sqlite3.connect(FINANCE_DB) as conn:
         df = pd.read_sql(
@@ -360,7 +269,6 @@ def get_slice(market: str, month_end: str) -> pd.DataFrame:
             conn, params=(market, month_end)
         )
     return df
-
 
 def get_slice_multi(markets: List[str], month_end: str) -> pd.DataFrame:
     if not markets:
@@ -377,7 +285,6 @@ def get_slice_multi(markets: List[str], month_end: str) -> pd.DataFrame:
         )
     return df
 
-
 def get_history(market: str, metric: str, months: int = 12) -> pd.DataFrame:
     with sqlite3.connect(FINANCE_DB) as conn:
         df = pd.read_sql(
@@ -392,7 +299,6 @@ def get_history(market: str, metric: str, months: int = 12) -> pd.DataFrame:
     if df.empty:
         return df
     return df.tail(months)
-
 
 def get_history_multi(markets: List[str], metric: str) -> pd.DataFrame:
     if not markets:
@@ -410,10 +316,12 @@ def get_history_multi(markets: List[str], metric: str) -> pd.DataFrame:
         )
     return df
 
-
 # ----------------------------
 # Aggregation (GLOBAL view)
 # ----------------------------
+def _is_margin_metric_name(metric: str) -> bool:
+    return (metric in MARGIN_HINTS) or metric.endswith("%")
+
 def aggregate_slice(df: pd.DataFrame,
                     markets: List[str],
                     month_end: str,
@@ -431,7 +339,7 @@ def aggregate_slice(df: pd.DataFrame,
 
     out = []
     for (metric, unit, scope, basis), g in df.groupby(["metric","unit","scope","basis"], dropna=False):
-        if _is_margin(metric, unit):
+        if _is_margin_metric_name(metric):
             if weights is not None and not weights.empty:
                 merged = g.merge(weights.rename("w"), left_on="market", right_index=True, how="left")
                 merged["w"] = merged["w"].fillna(0)
@@ -448,21 +356,16 @@ def aggregate_slice(df: pd.DataFrame,
         })
     return pd.DataFrame(out)
 
-
-def aggregate_history(markets: List[str],
-                      metric: str,
+def aggregate_history(markets: List[str], metric: str,
                       weight_metric: Optional[str] = "Revenue",
-                      weight_scope: str = "ITM",
-                      weight_basis: str = "Act") -> pd.DataFrame:
+                      weight_scope: str = "ITM", weight_basis: str = "Act") -> pd.DataFrame:
     raw = get_history_multi(markets, metric)
     if raw.empty:
         return raw
-    is_margin = (metric in MARGIN_HINTS) or metric.endswith("%")
-    if not is_margin:
+    if not _is_margin_metric_name(metric):
         return raw.groupby("month_end", as_index=False)["value"].sum()
     if not weight_metric:
         return raw.groupby("month_end", as_index=False)["value"].mean()
-
     ph = ",".join(["?"] * len(markets))
     with sqlite3.connect(FINANCE_DB) as conn:
         wdf = pd.read_sql(
@@ -483,18 +386,16 @@ def aggregate_history(markets: List[str],
     ).reset_index(name="value")
     return agg
 
-
 # ----------------------------
-# Commentary (unchanged core)
+# Commentary core + validation
 # ----------------------------
 def validate_commentary(text: str, metric: str) -> Tuple[float, bool]:
-    coverage = 100 if metric.lower() in text.lower() else 50
-    specificity = 100 if re.search(r"\d", text) else 50
+    coverage = 100 if metric and metric.lower() in (text or "").lower() else 50
+    specificity = 100 if re.search(r"\d", text or "") else 50
     correctness = 90
     coherence = 90
     score = (coverage + specificity + correctness + coherence) / 4
     return score, score >= 80
-
 
 def store_commentary(market: str, month_end: str, metric: str, text: str, author: str,
                      score: float, passed: bool, accepted: int = 0) -> None:
@@ -507,7 +408,6 @@ def store_commentary(market: str, month_end: str, metric: str, text: str, author
             (market, month_end, metric, text, author, score, int(passed), int(accepted)),
         )
 
-
 def load_commentary(market: str, month_end: str) -> pd.DataFrame:
     with sqlite3.connect(COMMENTARY_DB) as conn:
         df = pd.read_sql(
@@ -519,7 +419,6 @@ def load_commentary(market: str, month_end: str) -> pd.DataFrame:
             """, conn, params=(market, month_end)
         )
     return df
-
 
 def save_commentary_edits(df_edit: pd.DataFrame) -> None:
     with sqlite3.connect(COMMENTARY_DB) as conn:
@@ -534,9 +433,8 @@ def save_commentary_edits(df_edit: pd.DataFrame) -> None:
                  int(r["passed"]), int(r["accepted"]), int(r["id"]))
             )
 
-
 # ----------------------------
-# Auto commentary (kept as before)
+# Auto commentary (baseline)
 # ----------------------------
 def get_value(market: str, month_end: str, metric: str, scope: str, basis: str) -> Optional[float]:
     with sqlite3.connect(FINANCE_DB) as conn:
@@ -549,7 +447,6 @@ def get_value(market: str, month_end: str, metric: str, scope: str, basis: str) 
         )
     return None if df.empty else float(df["value"].iloc[0])
 
-
 def generate_cfo_commentary_enhanced(df_slice: pd.DataFrame, market: str, month_end: str,
                                      level_thr: float, margin_thr: float,
                                      kpis: List[str]) -> List[str]:
@@ -558,8 +455,7 @@ def generate_cfo_commentary_enhanced(df_slice: pd.DataFrame, market: str, month_
     prev_m = (dt - MonthEnd(1)).strftime("%Y-%m-%d")
     prev_y = (dt - DateOffset(years=1)).strftime("%Y-%m-%d")
 
-    def _thr(metric, unit):
-        return (margin_thr if _is_margin(metric, unit) else level_thr)
+    def _thr(metric, unit): return (margin_thr if _is_margin(metric, unit) else level_thr)
 
     for metric in kpis:
         sub = df_slice[df_slice["metric"] == metric]
@@ -567,19 +463,16 @@ def generate_cfo_commentary_enhanced(df_slice: pd.DataFrame, market: str, month_
             continue
         unit = sub["unit"].dropna().iloc[0] if not sub["unit"].dropna().empty else None
         thr = _thr(metric, unit)
-
         itm = sub[(sub["scope"] == "ITM")]
         if not itm.empty:
             vbud = itm[itm["basis"] == "vs BUD"]["value"]
             if not vbud.empty and abs(float(vbud.iloc[0])) >= thr:
                 sign = "above" if vbud.iloc[0] > 0 else "below"
                 comments.append(f"{metric} {sign} budget by {_fmt_delta(float(vbud.iloc[0]), unit)} (ITM).")
-
             vly = itm[itm["basis"] == "vs n-1"]["value"]
             if not vly.empty and abs(float(vly.iloc[0])) >= thr:
                 sign = "up" if vly.iloc[0] > 0 else "down"
                 comments.append(f"{metric} {sign} YoY by {_fmt_delta(float(vly.iloc[0]), unit)} (ITM).")
-
         if market != "GLOBAL":
             act_now = get_value(market, month_end, metric, "ITM", "Act")
             act_prev = get_value(market, prev_m, metric, "ITM", "Act")
@@ -588,7 +481,6 @@ def generate_cfo_commentary_enhanced(df_slice: pd.DataFrame, market: str, month_
                 if abs(mom) >= thr:
                     sign = "higher" if mom > 0 else "lower"
                     comments.append(f"{metric} {sign} MoM by {_fmt_delta(mom, unit)} (ITM).")
-
         ytd_now = sub[(sub["scope"] == "YTD") & (sub["basis"] == "Act")]["value"]
         if not ytd_now.empty and market != "GLOBAL":
             ytd_prev_y = get_value(market, prev_y, metric, "YTD", "Act")
@@ -599,16 +491,14 @@ def generate_cfo_commentary_enhanced(df_slice: pd.DataFrame, market: str, month_
                     comments.append(f"{metric} {sign} versus PY-YTD by {_fmt_delta(yoy_ytd, unit)} (YTD).")
     return comments
 
-
 # ----------------------------
-# KPI priorities selector (robust, with preview)
+# KPI priority selector (HARDENED)
 # ----------------------------
 def _colored_delta_html(metric: str, val: Optional[float], unit) -> str:
     if val is None or pd.isna(val):
         return f'<span style="color:{GREY}">–</span>'
-    color = color_for_delta(metric, val)  # DSO business-sense
+    color = color_for_delta(metric, val)
     return f'<span style="color:{color}; font-weight:600">{_fmt_delta(float(val), unit)}</span>'
-
 
 def _preview_line(df_slice: pd.DataFrame, metric: str) -> str:
     sub = df_slice[df_slice["metric"] == metric]
@@ -621,39 +511,56 @@ def _preview_line(df_slice: pd.DataFrame, metric: str) -> str:
     vl = float(vly.iloc[0]) if not vly.empty else None
     return f"<b>{metric}</b> — vs BUD: {_colored_delta_html(metric, vb, unit)} | vs n-1: {_colored_delta_html(metric, vl, unit)}"
 
-
-def _init_priority_table(metrics: list[str], key: str, default_show: bool) -> pd.DataFrame:
+def _init_priority_table(metrics: List[str], key: str, default_show: bool) -> pd.DataFrame:
     # Always start with both columns present
     df = pd.DataFrame({"metric": sorted(metrics)})
     df["Show"] = bool(default_show)
 
     prev = st.session_state.get(key)
-    if isinstance(prev, pd.DataFrame) and {"metric", "Show"}.issubset(prev.columns):
-        # keep only metrics that still exist, map back to df
-        prev = prev[prev["metric"].isin(metrics)].copy()
-        prev["Show"] = prev["Show"].astype(bool)
-        prev_map = dict(zip(prev["metric"], prev["Show"]))
-        df["Show"] = df["metric"].map(prev_map).fillna(default_show).astype(bool)
 
-    # Guarantee correct dtypes/columns even if metrics is empty
+    # Coerce prior state safely
+    if isinstance(prev, pd.DataFrame):
+        pass
+    elif isinstance(prev, (list, tuple)):
+        try:
+            prev = pd.DataFrame(prev)
+        except Exception:
+            prev = None
+    elif isinstance(prev, dict):
+        prev = pd.DataFrame([prev]) if "metric" in prev else None
+
+    # Merge previous selections if valid
+    if isinstance(prev, pd.DataFrame) and "metric" in prev.columns:
+        if "Show" not in prev.columns:
+            prev["Show"] = False
+        prev = prev[prev["metric"].isin(df["metric"])][["metric", "Show"]].copy()
+        prev["Show"] = prev["Show"].astype(bool)
+        df = df.merge(prev, on="metric", how="left", suffixes=("", "_old"))
+        if "Show_y" in df.columns:
+            df["Show"] = df["Show_y"]
+            df.drop(columns=[c for c in df.columns if c.endswith("_y") or c.endswith("_old")], inplace=True)
+
     if "Show" not in df.columns:
         df["Show"] = bool(default_show)
-    df["Show"] = df["Show"].astype(bool)
+    df["Show"] = df["Show"].fillna(default_show).astype(bool)
 
-    st.session_state[key] = df
-    return df
-
-
+    st.session_state[key] = df[["metric", "Show"]]
+    return st.session_state[key]
 
 def kpi_priority_selector(df_slice: pd.DataFrame) -> List[str]:
     st.sidebar.header("KPI Priorities")
+
+    # Reset state helper
+    if st.sidebar.button("Reset KPI selector state"):
+        for k in ("kpi_tbl_P1", "kpi_tbl_P2", "kpi_tbl_P3",
+                  "kpi_tbl_P1_editor", "kpi_tbl_P2_editor", "kpi_tbl_P3_editor"):
+            st.session_state.pop(k, None)
+        st.sidebar.success("KPI selector state cleared. Rerun or keep going.")
 
     available = sorted(df_slice["metric"].unique().tolist())
     p1 = [m for m in available if priority_of(m) == "P1"]
     p2 = [m for m in available if priority_of(m) == "P2"]
     p3 = [m for m in available if priority_of(m) == "P3"]
-
-    # Fallback: if P2 empty, promote likely discipline proxies from P3
     if not p2:
         heur = [m for m in available if re.search(r'(opex|sg&?a|cost|rate|utili|headcount|fte|vendor|external|indirect)', m, re.I)]
         p2 = [m for m in heur if m not in p1]
@@ -686,9 +593,16 @@ def kpi_priority_selector(df_slice: pd.DataFrame) -> List[str]:
                 },
                 width="stretch",
             )
+
+            # Normalize editor output (defensive)
+            if not isinstance(edited, pd.DataFrame):
+                edited = pd.DataFrame(edited)
+            if "metric" not in edited.columns:
+                edited["metric"] = []
             if "Show" not in edited.columns:
                 edited["Show"] = False
             edited["Show"] = edited["Show"].astype(bool)
+            edited = edited[["metric", "Show"]]
             st.session_state[key] = edited
 
             show_prev = st.checkbox("Show variance preview", value=False, key=key+"_preview")
@@ -703,7 +617,7 @@ def kpi_priority_selector(df_slice: pd.DataFrame) -> List[str]:
     table_block("P2 — Efficiency & Spend", "kpi_tbl_P2", tbl_p2)
     table_block("P3 — Operational drivers", "kpi_tbl_P3", tbl_p3)
 
-    # Final KPI set + expose per-priority selections
+    # Final KPI set + persist selections by bucket
     kpis = []
     sel_p1 = []; sel_p2 = []; sel_p3 = []
     for key, lst, bucket in [("kpi_tbl_P1", p1, "P1"), ("kpi_tbl_P2", p2, "P2"), ("kpi_tbl_P3", p3, "P3")]:
@@ -719,13 +633,11 @@ def kpi_priority_selector(df_slice: pd.DataFrame) -> List[str]:
     st.session_state["selected_P3"] = sel_p3
     return kpis
 
-
 # ----------------------------
-# “What Changed” (one row/metric, Impact, DSO coloring) — uses Pandas Styler
+# “What Changed” (Styler; DSO coloring)
 # ----------------------------
 def threshold_for_metric(metric: str, unit: Optional[str], level_thr: float, margin_thr: float) -> float:
     return margin_thr if _is_margin(metric, unit) else level_thr
-
 
 def build_changes_df(df_slice: pd.DataFrame,
                      level_thr: float,
@@ -763,7 +675,6 @@ def build_changes_df(df_slice: pd.DataFrame,
         })
     return pd.DataFrame(rows)
 
-
 def render_changes_panel(df_slice: pd.DataFrame,
                          kpis: List[str],
                          level_thr: float,
@@ -777,7 +688,6 @@ def render_changes_panel(df_slice: pd.DataFrame,
     if kpis:
         base = base[base["metric"].isin(kpis)]
 
-    # Default view = P1
     view_opt = st.radio("View", options=["P1", "P2", "P3", "All"],
                         index=0, horizontal=True, key="wc_view")
     if view_opt != "All":
@@ -786,7 +696,6 @@ def render_changes_panel(df_slice: pd.DataFrame,
         st.info("No metrics match this view.")
         return
 
-    # Build display strings (plain text)
     disp = pd.DataFrame(index=base.index)
     disp["Metric"]     = base["metric"]
     disp["ITM Act"]    = [_fmt_value(v, u) if v is not None else "–"
@@ -804,7 +713,6 @@ def render_changes_panel(df_slice: pd.DataFrame,
     disp["Impact"] = base["impact"].apply(lambda x: f"{x:.1f}×")
     disp = disp.loc[base.sort_values("impact", ascending=False).index]
 
-    # Styler helpers that color by metric + delta (DSO lower = green)
     def style_delta(num_col: str):
         def _styler(col: pd.Series):
             styles = []
@@ -820,20 +728,16 @@ def render_changes_panel(df_slice: pd.DataFrame,
 
     styler = (disp.style
               .apply(style_delta("vs_bud"), subset=["vs BUD"])
-              .apply(style_delta("vs_ly"), subset=["vs n-1"])
-             )
+              .apply(style_delta("vs_ly"), subset=["vs n-1"]))
     if have_ytd:
         styler = styler.apply(style_delta("ytd_vs_bud"), subset=["YTD vs BUD"])
 
-    # Bold ITM Act, align
     right_cols = [c for c in disp.columns if c != "Metric"]
     styler = (styler
               .set_properties(subset=["ITM Act"], **{"font-weight": "600"})
-              .set_properties(subset=right_cols, **{"text-align": "right"})
-             )
+              .set_properties(subset=right_cols, **{"text-align": "right"}))
 
-    st.dataframe(styler, hide_index=True, width="stretch")
-
+    st.dataframe(styler, hide_index=True, use_container_width=True)
 
 # ----------------------------
 # KPI tiles, Trends, Priority charts
@@ -861,7 +765,6 @@ def render_kpi_cards(df_slice: pd.DataFrame, kpis: List[str]):
                                             f"vs n-1: {ly_delta}" if ly_delta else None] if x]) or None
         with cols[i]:
             st.metric(metric, value=_fmt_value(act_val, unit), delta=delta_str)
-
 
 def render_trends(markets: List[str], kpis: List[str], engine: str,
                   weight_metric: Optional[str], weight_scope: str, weight_basis: str,
@@ -893,11 +796,11 @@ def render_trends(markets: List[str], kpis: List[str], engine: str,
                 hist["month_end"] = pd.to_datetime(hist["month_end"])
                 st.caption(f"{metric} — {mkt}")
                 if engine == "Plotly":
+                    import plotly.express as px
                     fig = px.line(hist, x="month_end", y="value")
                     st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.line_chart(hist.set_index("month_end")[["value"]])
-
 
 def render_priority_charts(markets: List[str],
                            engine: str,
@@ -944,16 +847,112 @@ def render_priority_charts(markets: List[str],
         for m in p3:
             _chart(m)
 
+# ----------------------------
+# Deviation helpers for Manual Commentary
+# ----------------------------
+def _safe_pct(diff: Optional[float], base: Optional[float]) -> Optional[float]:
+    if diff is None or pd.isna(diff) or base is None or pd.isna(base) or base == 0:
+        return None
+    return 100.0 * float(diff) / float(base)
+
+def _metric_snapshot(df_slice: pd.DataFrame, metric: str):
+    """Return dict of act, vs_bud, vs_ly, ytd_act, ytd_vs_bud, baselines, unit + formatted."""
+    sub = df_slice[df_slice["metric"] == metric]
+    if sub.empty:
+        return {}
+    unit = sub["unit"].dropna().iloc[0] if not sub["unit"].dropna().empty else None
+    act = sub[(sub["scope"] == "ITM") & (sub["basis"] == "Act")]["value"]
+    bud = sub[(sub["scope"] == "ITM") & (sub["basis"] == "vs BUD")]["value"]
+    ly  = sub[(sub["scope"] == "ITM") & (sub["basis"] == "vs n-1")]["value"]
+    ytd_act = sub[(sub["scope"] == "YTD") & (sub["basis"] == "Act")]["value"]
+    ytd_bud = sub[(sub["scope"] == "YTD") & (sub["basis"] == "vs BUD")]["value"]
+
+    act_v = float(act.iloc[0]) if not act.empty else None
+    bud_v = float(bud.iloc[0]) if not bud.empty else None
+    ly_v  = float(ly.iloc[0])  if not ly.empty  else None
+    ytd_act_v = float(ytd_act.iloc[0]) if not ytd_act.empty else None
+    ytd_bud_v = float(ytd_bud.iloc[0]) if not ytd_bud.empty else None
+
+    # Reconstruct baselines: Budget = Act - (Act-Bud), LY = Act - (Act-LY)
+    budget_base = act_v - bud_v if (act_v is not None and bud_v is not None) else None
+    ly_base     = act_v - ly_v  if (act_v is not None and ly_v  is not None) else None
+    ytd_budget_base = ytd_act_v - ytd_bud_v if (ytd_act_v is not None and ytd_bud_v is not None) else None
+
+    return {
+        "unit": unit,
+        "act": act_v,
+        "vs_bud": bud_v,
+        "vs_ly": ly_v,
+        "ytd_act": ytd_act_v,
+        "ytd_vs_bud": ytd_bud_v,
+        "budget_base": budget_base,
+        "ly_base": ly_base,
+        "ytd_budget_base": ytd_budget_base,
+        "act_fmt": _fmt_value(act_v, unit),
+        "vs_bud_fmt": _fmt_delta(bud_v, unit) if bud_v is not None else None,
+        "vs_ly_fmt": _fmt_delta(ly_v, unit) if ly_v is not None else None,
+        "ytd_vs_bud_fmt": _fmt_delta(ytd_bud_v, unit) if ytd_bud_v is not None else None,
+    }
+
+def build_deviation_table(df_slice: pd.DataFrame, metrics: List[str]) -> pd.DataFrame:
+    rows = []
+    for m in metrics:
+        snap = _metric_snapshot(df_slice, m)
+        if not snap:
+            continue
+        pct_bud = _safe_pct(snap["vs_bud"], snap["budget_base"])
+        pct_ly  = _safe_pct(snap["vs_ly"], snap["ly_base"])
+        pct_ytd = _safe_pct(snap["ytd_vs_bud"], snap["ytd_budget_base"])
+        rows.append({
+            "metric": m,
+            "unit": snap["unit"],
+            "pct_vs_bud": pct_bud,
+            "pct_vs_ly": pct_ly,
+            "pct_ytd_vs_bud": pct_ytd,
+            "delta_vs_bud": snap["vs_bud"],
+            "delta_vs_ly": snap["vs_ly"],
+            "delta_ytd_vs_bud": snap["ytd_vs_bud"],
+            "max_abs_pct": max([abs(x) for x in [pct_bud, pct_ly, pct_ytd] if x is not None], default=None),
+        })
+    return pd.DataFrame(rows)
 
 # ----------------------------
-# Commentary panel
+# Comment templates
+# ----------------------------
+COMMENT_TEMPLATES = {
+    "Budget variance (ITM)": "{metric}: {direction_bud} budget by {vs_bud_fmt} (Act {act_fmt}).",
+    "YoY variance (ITM)":    "{metric}: {direction_ly} vs last year by {vs_ly_fmt} (Act {act_fmt}).",
+    "YTD vs Budget":         "{metric} YTD: {direction_ytd} budget by {ytd_vs_bud_fmt}.",
+}
+
+def _fill_template(name: str, metric: str, snap: dict) -> Optional[str]:
+    if name not in COMMENT_TEMPLATES or not snap:
+        return None
+    def _dir(val, better_lower=False):
+        if val is None: return "flat to"
+        if better_lower:  # e.g., DSO
+            return "below" if val < 0 else "above" if val > 0 else "flat to"
+        return "above" if val > 0 else "below" if val < 0 else "flat to"
+    return COMMENT_TEMPLATES[name].format(
+        metric=metric,
+        act_fmt=snap.get("act_fmt","-"),
+        vs_bud_fmt=snap.get("vs_bud_fmt","-"),
+        vs_ly_fmt=snap.get("vs_ly_fmt","-"),
+        ytd_vs_bud_fmt=snap.get("ytd_vs_bud_fmt","-"),
+        direction_bud=_dir(snap.get("vs_bud"), better_lower=is_better_when_lower(metric)),
+        direction_ly="up" if (snap.get("vs_ly") or 0) > 0 else "down" if (snap.get("vs_ly") or 0) < 0 else "flat",
+        direction_ytd=_dir(snap.get("ytd_vs_bud"), better_lower=is_better_when_lower(metric)),
+    )
+
+# ----------------------------
+# Manual Commentary (with deviation threshold gating)
 # ----------------------------
 def render_commentary_panel(markets: List[str], market_label: str, month_end: str,
                             df_slice: pd.DataFrame, kpis: List[str],
                             level_thr: float, margin_thr: float, global_view: bool):
     st.subheader("Commentary")
 
-    # ---- Auto commentary (unchanged behavior) ----
+    # Auto commentary
     auto_comments = generate_cfo_commentary_enhanced(df_slice, market_label, month_end, level_thr, margin_thr, kpis)
     if auto_comments:
         st.markdown("**Auto Commentary**")
@@ -970,22 +969,16 @@ def render_commentary_panel(markets: List[str], market_label: str, month_end: st
     st.markdown("---")
     st.markdown("**Add Manual Commentary**")
 
-    # ---- Deviation monitor & threshold ----
+    # Deviation monitor & threshold (default 10%)
     st.caption("Explain large deviations (default threshold 10%). Adjust below if needed.")
     deviation_threshold = st.number_input("Deviation threshold (%)", value=10.0, step=0.5, min_value=0.0, key="dev_threshold")
-
-    # Build deviation table on current KPI selection (or all metrics if none picked)
     metrics_for_monitor = kpis if kpis else sorted(df_slice["metric"].unique().tolist())
     dev = build_deviation_table(df_slice, metrics_for_monitor)
 
     if not dev.empty:
-        # Flagged metrics = any % deviation above threshold (absolute)
         dev["flagged"] = dev["max_abs_pct"].apply(lambda x: (abs(x) >= deviation_threshold) if x is not None else False)
-
-        # Styled view
         disp = dev.copy()
-        disp = disp[["metric", "pct_vs_bud", "pct_vs_ly", "pct_ytd_vs_bud", "max_abs_pct", "flagged"]]
-        disp = disp.rename(columns={
+        disp = disp[["metric", "pct_vs_bud", "pct_vs_ly", "pct_ytd_vs_bud", "max_abs_pct", "flagged"]].rename(columns={
             "metric": "Metric",
             "pct_vs_bud": "vs BUD (%)",
             "pct_vs_ly": "vs LY (%)",
@@ -996,27 +989,25 @@ def render_commentary_panel(markets: List[str], market_label: str, month_end: st
 
         def _fmt_pct(x):
             return "-" if x is None or pd.isna(x) else f"{x:.1f}%"
-
         for c in ["vs BUD (%)", "vs LY (%)", "YTD vs BUD (%)", "Max |%|"]:
             disp[c] = disp[c].apply(_fmt_pct)
 
-        # Color by sign using original deltas so DSO green=decrease
-        def style_pct(col_name: str, delta_col: str):
+        def style_pct(delta_col: str):
             def _styler(col: pd.Series):
                 styles = []
+                # align to disp's index which mirrors dev
                 for idx in col.index:
-                    m = dev.loc[dev.index[idx], "metric"]
-                    d = dev.loc[dev.index[idx], delta_col]
+                    m = dev.iloc[idx]["metric"]
+                    d = dev.iloc[idx][delta_col]
                     styles.append(f"color: {color_for_delta(m, d)}; font-weight: 600" if d is not None else f"color:{GREY}")
                 return styles
             return _styler
 
         styler = (disp.style
-                  .apply(style_pct("vs BUD (%)", "delta_vs_bud"), subset=["vs BUD (%)"])
-                  .apply(style_pct("vs LY (%)", "delta_vs_ly"), subset=["vs LY (%)"])
-                  .apply(style_pct("YTD vs BUD (%)", "delta_ytd_vs_bud"), subset=["YTD vs BUD (%)"])
-                 )
-        st.dataframe(styler, hide_index=True, width="stretch")
+                  .apply(style_pct("delta_vs_bud"), subset=["vs BUD (%)"])
+                  .apply(style_pct("delta_vs_ly"), subset=["vs LY (%)"])
+                  .apply(style_pct("delta_ytd_vs_bud"), subset=["YTD vs BUD (%)"]))
+        st.dataframe(styler, hide_index=True, use_container_width=True)
 
         required = set(dev.loc[dev["flagged"], "metric"].tolist())
     else:
@@ -1027,14 +1018,16 @@ def render_commentary_panel(markets: List[str], market_label: str, month_end: st
         if st.button("Select all required metrics"):
             st.session_state["manual_metrics"] = list(sorted(required))
 
-    # ---- Tagging + templates ----
+    # Tagging + templates
     selectable_metrics = ["General"] + (kpis if kpis else sorted(df_slice["metric"].unique().tolist()))
-    chosen_metrics = st.multiselect("Attach to metric(s)", options=selectable_metrics,
+    chosen_metrics = st.multiselect("Attach to metric(s)",
+                                    options=selectable_metrics,
                                     default=(list(sorted(required)) if required else ["General"]),
-                                    max_selections=10, key="manual_metrics")
+                                    max_selections=10,
+                                    key="manual_metrics")
 
-    # To power templates with numbers, let user choose one metric context
-    template_metric = st.selectbox("Template metric (for numbers)", options=(kpis if kpis else selectable_metrics[1:]) or ["(none)"])
+    template_metric = st.selectbox("Template metric (for numbers)",
+                                   options=(kpis if kpis else selectable_metrics[1:]) or ["(none)"])
     template_name = st.selectbox("Template", options=list(COMMENT_TEMPLATES.keys()))
     if st.button("Apply template"):
         if template_metric and template_metric != "(none)":
@@ -1047,7 +1040,7 @@ def render_commentary_panel(markets: List[str], market_label: str, month_end: st
     text = st.text_area("Commentary", key="manual_text", value=st.session_state.get("manual_text", ""), height=120)
     author = st.text_input("Author", key="manual_author", value=st.session_state.get("manual_author",""))
 
-    # Live validation (use first specific metric if any)
+    # Live validation
     metric_for_score = next((m for m in chosen_metrics if m != "General"), "General")
     score, passed = validate_commentary(text, metric_for_score)
     st.caption(f"Score: **{score:.1f}** — {'Pass' if passed else 'Needs work'}")
@@ -1058,7 +1051,7 @@ def render_commentary_panel(markets: List[str], market_label: str, month_end: st
         tgt = st.radio("Save for", options=["GLOBAL only", "Each selected market"], horizontal=True)
         save_targets = [(market_label,)] if tgt == "GLOBAL only" else [(m,) for m in markets]
 
-    # Gate: ensure all required metrics are covered by tags
+    # Gate: ensure all required metrics are covered by tags (excluding 'General')
     missing_explanations = sorted(list(required - set([m for m in chosen_metrics if m != "General"])))
     if required and missing_explanations:
         st.error("You must tag commentary for these metrics before saving: " + ", ".join(missing_explanations))
@@ -1093,17 +1086,21 @@ def render_commentary_panel(markets: List[str], market_label: str, month_end: st
     st.markdown("**Commentary Manager (edit / accept / reject)**")
     saved = load_commentary(market_label, month_end)
     if not saved.empty:
-        edited = st.data_editor(saved, num_rows="dynamic",
-                                column_config={"id": st.column_config.NumberColumn(disabled=True),
-                                               "passed": st.column_config.CheckboxColumn(),
-                                               "accepted": st.column_config.CheckboxColumn()},
-                                width="stretch")
+        edited = st.data_editor(
+            saved,
+            num_rows="dynamic",
+            column_config={
+                "id": st.column_config.NumberColumn(disabled=True),
+                "passed": st.column_config.CheckboxColumn(),
+                "accepted": st.column_config.CheckboxColumn()
+            },
+            width="stretch",
+        )
         if st.button("Apply Changes"):
-            save_commentary_edits(edited); st.success("Commentary updated.")
+            save_commentary_edits(edited)
+            st.success("Commentary updated.")
     else:
         st.info("No saved commentary yet for this selection.")
-
-
 
 # ----------------------------
 # Downloads
@@ -1127,13 +1124,12 @@ def render_downloads(df_slice: pd.DataFrame, market_label: str, month_end: str):
             mime="text/csv",
         )
 
-
 # ----------------------------
 # Streamlit app
 # ----------------------------
 def run_streamlit() -> None:
-    st.set_page_config(page_title="G5 Country Financial", layout="wide")
-    st.title("G5 Country Finance Dashboard")
+    st.set_page_config(page_title="Finance Dashboard", layout="wide")
+    st.title("Finance Dashboard")
     init_dbs()
 
     st.header("Upload Excel")
@@ -1206,9 +1202,8 @@ def run_streamlit() -> None:
     render_changes_panel(df_slice, kpis, level_thr, margin_thr)
     render_trends(markets, kpis, chart_engine, weight_metric, weight_scope, weight_basis, global_view)
     render_priority_charts(markets, chart_engine, weight_metric, weight_scope, weight_basis, global_view)
-    render_commentary_panel(market_label, month_end, df_slice, kpis, level_thr, margin_thr)
+    render_commentary_panel(markets, market_label, month_end, df_slice, kpis, level_thr, margin_thr, global_view)
     render_downloads(df_slice, market_label, month_end)
-
 
 # ----------------------------
 # CLI
@@ -1219,14 +1214,12 @@ def cli_ingest(args: argparse.Namespace) -> None:
     store_financials(df)
     print("Ingested:", args.file)
 
-
 def cli_comment(args: argparse.Namespace) -> None:
     init_dbs()
     text = " ".join(args.text)
     score, passed = validate_commentary(text, args.metric)
     store_commentary(args.market, args.month_end, args.metric, text, args.author, score, passed, accepted=0)
     print(f"Saved. Score: {score:.1f} — Pass: {passed}")
-
 
 def main() -> None:
     if len(sys.argv) == 1:
@@ -1245,7 +1238,6 @@ def main() -> None:
     args = parser.parse_args()
     if hasattr(args, "func"):
         args.func(args)
-
 
 if __name__ == "__main__":
     main()
