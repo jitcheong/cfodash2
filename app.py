@@ -942,7 +942,7 @@ def render_downloads(df_slice: pd.DataFrame, market_label: str, month_end: str):
 # ----------------------------
 def run_streamlit() -> None:
     st.set_page_config(page_title="G5 Country Financial", layout="wide")
-    st.title("Finance Dashboard")
+    st.title("G5 Country Finance Dashboard")
     init_dbs()
 
     st.header("Upload Excel")
