@@ -622,16 +622,27 @@ def _preview_line(df_slice: pd.DataFrame, metric: str) -> str:
     return f"<b>{metric}</b> — vs BUD: {_colored_delta_html(metric, vb, unit)} | vs n-1: {_colored_delta_html(metric, vl, unit)}"
 
 
-def _init_priority_table(metrics: List[str], key: str, default_show: bool) -> pd.DataFrame:
-    df = pd.DataFrame({"metric": sorted(metrics), "Show": default_show})
-    df["Show"] = df["Show"].astype(bool)
+def _init_priority_table(metrics: list[str], key: str, default_show: bool) -> pd.DataFrame:
+    # Always start with both columns present
+    df = pd.DataFrame({"metric": sorted(metrics)})
+    df["Show"] = bool(default_show)
+
     prev = st.session_state.get(key)
     if isinstance(prev, pd.DataFrame) and {"metric", "Show"}.issubset(prev.columns):
-        prev = prev[prev["metric"].isin(metrics)]
-        prev_map = dict(zip(prev["metric"], prev["Show"].astype(bool)))
+        # keep only metrics that still exist, map back to df
+        prev = prev[prev["metric"].isin(metrics)].copy()
+        prev["Show"] = prev["Show"].astype(bool)
+        prev_map = dict(zip(prev["metric"], prev["Show"]))
         df["Show"] = df["metric"].map(prev_map).fillna(default_show).astype(bool)
+
+    # Guarantee correct dtypes/columns even if metrics is empty
+    if "Show" not in df.columns:
+        df["Show"] = bool(default_show)
+    df["Show"] = df["Show"].astype(bool)
+
     st.session_state[key] = df
     return df
+
 
 
 def kpi_priority_selector(df_slice: pd.DataFrame) -> List[str]:
