@@ -6,7 +6,6 @@ import os
 import re
 import sqlite3
 import sys
-from calendar import monthrange
 from datetime import datetime
 from typing import List, Tuple, Optional
 
@@ -17,11 +16,35 @@ from pandas.tseries.offsets import MonthEnd, DateOffset
 FINANCE_DB = "finance.db"
 COMMENTARY_DB = "commentary.db"
 
-# Default “suggested” KPIs; users can add/remove from sidebar based on what exists
+# Default “suggested” KPIs for initial picks; actual availability comes from data
 DEFAULT_KPIS = ["Revenue", "GM%", "EBITDA%", "Opex%", "DSO", "Capex"]
-MARGIN_HINTS = {"GM%", "EBITDA%", "Opex%"}          # treat these as margin-like
-MARGIN_UNITS = {"%", "pts", "pt"}                   # if unit matches, treat as margin-like
+MARGIN_HINTS = {"GM%", "EBITDA%", "Opex%"}           # treat these as margin-like
+MARGIN_UNITS = {"%", "pts", "pt"}                    # if unit matches, treat as margin-like
 
+# Priority rules (regex → P1/P2; everything else falls into P3)
+PRIORITY_RULES = [
+    (re.compile(r'^(revenue|sales|net\s*revenue)$', re.I), "P1"),
+    (re.compile(r'^(gross\s*margin(\s*%)?|gm%?|gm$)', re.I), "P1"),
+    (re.compile(r'^ebitda(\s*%)?$', re.I), "P1"),
+    (re.compile(r'^dso$', re.I), "P1"),
+    (re.compile(r'^(capex|capital\s*exp)', re.I), "P1"),
+
+    (re.compile(r'^(opex(\s*%)?|operating\s*expense)', re.I), "P2"),
+    (re.compile(r'^(dpo|dio|ccc|cash\s*conversion)', re.I), "P2"),
+    (re.compile(r'^(bookings|billings|arr|mrr)', re.I), "P2"),
+]
+
+def priority_of(metric: str) -> str:
+    name = (metric or "").strip()
+    for pat, p in PRIORITY_RULES:
+        if pat.search(name):
+            return p
+    return "P3"
+
+# Colors for preview
+DARK_GREEN = "#006400"
+RED = "#C00000"
+GREY = "#9CA3AF"
 
 # ----------------------------
 # DB init & schema evolve
@@ -84,9 +107,7 @@ def parse_filename(filename: str) -> Tuple[str, str]:
     base_no_ext = os.path.splitext(os.path.basename(filename))[0]
     m = re.match(r"^(?P<market>[A-Za-z]+)_(?P<mon>[A-Za-z]{3}\d{4})$", base_no_ext)
     if not m:
-        raise ValueError(
-            "Filename must be '<MARKET>_<MonYYYY>.xlsx' (e.g., 'SG_Aug2025.xlsx')."
-        )
+        raise ValueError("Filename must be '<MARKET>_<MonYYYY>.xlsx' (e.g., 'SG_Aug2025.xlsx').")
     market = m.group("market").upper()
     mon = datetime.strptime(m.group("mon").title(), "%b%Y")
     return market, _true_month_end(mon)
@@ -216,14 +237,6 @@ def get_markets() -> List[str]:
         df = pd.read_sql("SELECT DISTINCT market FROM financials ORDER BY market", conn)
     return df["market"].dropna().tolist()
 
-def get_months_for_market(market: str) -> List[str]:
-    with sqlite3.connect(FINANCE_DB) as conn:
-        df = pd.read_sql(
-            "SELECT DISTINCT month_end FROM financials WHERE market = ? ORDER BY month_end",
-            conn, params=(market,)
-        )
-    return df["month_end"].dropna().tolist()
-
 def get_months_for_markets(markets: List[str]) -> List[str]:
     if not markets:
         return []
@@ -278,7 +291,6 @@ def get_history(market: str, metric: str, months: int = 12) -> pd.DataFrame:
     return df.tail(months)
 
 def get_history_multi(markets: List[str], metric: str) -> pd.DataFrame:
-    """Return month-wise values across markets for ITM Actual (no aggregation yet)."""
     if not markets:
         return pd.DataFrame(columns=["month_end","market","value"])
     ph = ",".join(["?"] * len(markets))
@@ -304,11 +316,6 @@ def aggregate_slice(df: pd.DataFrame,
                     weight_metric: Optional[str] = "Revenue",
                     weight_scope: str = "ITM",
                     weight_basis: str = "Act") -> pd.DataFrame:
-    """
-    Combine multiple markets into a single 'GLOBAL' slice.
-    - Level metrics -> sum
-    - Margin/rate metrics -> weighted avg by `weight_metric` (if available), else simple mean
-    """
     if df.empty:
         return df
 
@@ -319,7 +326,6 @@ def aggregate_slice(df: pd.DataFrame,
                      (df["scope"] == weight_scope) &
                      (df["basis"] == weight_basis)][["market", "value"]]
         weights = weights.rename(columns={"value": "w"})
-        # if a selected market lacks weight, treat as 0 (fallback will switch to mean)
         weights = weights.set_index("market")["w"]
 
     out = []
@@ -353,25 +359,19 @@ def aggregate_history(markets: List[str],
                       weight_metric: Optional[str] = "Revenue",
                       weight_scope: str = "ITM",
                       weight_basis: str = "Act") -> pd.DataFrame:
-    """Aggregate multi-market history month-wise for a metric (ITM Act)."""
     raw = get_history_multi(markets, metric)
     if raw.empty:
         return raw
 
-    # Level vs margin detection requires unit; we don't have unit here—assume by name
     is_margin = (metric in MARGIN_HINTS) or metric.endswith("%")
-
     if not is_margin:
-        # Sum values per month
         agg = raw.groupby("month_end", as_index=False)["value"].sum()
         return agg
 
-    # Margin: weighted avg by weight_metric
     if not weight_metric:
         agg = raw.groupby("month_end", as_index=False)["value"].mean()
         return agg
 
-    # Build weights per market&month
     ph = ",".join(["?"] * len(markets))
     with sqlite3.connect(FINANCE_DB) as conn:
         wdf = pd.read_sql(
@@ -395,7 +395,7 @@ def aggregate_history(markets: List[str],
 
 
 # ----------------------------
-# Commentary
+# Commentary (unchanged core)
 # ----------------------------
 def validate_commentary(text: str, metric: str) -> Tuple[float, bool]:
     coverage = 100 if metric.lower() in text.lower() else 50
@@ -443,11 +443,8 @@ def save_commentary_edits(df_edit: pd.DataFrame) -> None:
 
 
 # ----------------------------
-# Auto commentary (enhanced)
+# Auto commentary (existing enhanced version is kept)
 # ----------------------------
-def _threshold_for(metric: str, unit: Optional[str], level_thr: float, margin_thr: float) -> float:
-    return margin_thr if _is_margin(metric, unit) else level_thr
-
 def get_value(market: str, month_end: str, metric: str, scope: str, basis: str) -> Optional[float]:
     with sqlite3.connect(FINANCE_DB) as conn:
         df = pd.read_sql(
@@ -467,14 +464,16 @@ def generate_cfo_commentary_enhanced(df_slice: pd.DataFrame, market: str, month_
     prev_m = (dt - MonthEnd(1)).strftime("%Y-%m-%d")
     prev_y = (dt - DateOffset(years=1)).strftime("%Y-%m-%d")
 
+    def _thr(metric, unit):
+        return (margin_thr if _is_margin(metric, unit) else level_thr)
+
     for metric in kpis:
         sub = df_slice[df_slice["metric"] == metric]
         if sub.empty:
             continue
         unit = sub["unit"].dropna().iloc[0] if not sub["unit"].dropna().empty else None
-        thr = _threshold_for(metric, unit, level_thr, margin_thr)
+        thr = _thr(metric, unit)
 
-        # ITM comparisons available in slice
         itm = sub[(sub["scope"] == "ITM")]
         if not itm.empty:
             vbud = itm[itm["basis"] == "vs BUD"]["value"]
@@ -487,7 +486,6 @@ def generate_cfo_commentary_enhanced(df_slice: pd.DataFrame, market: str, month_
                 sign = "up" if vly.iloc[0] > 0 else "down"
                 comments.append(f"{metric} {sign} YoY by {_fmt_delta(float(vly.iloc[0]), unit)} (ITM).")
 
-        # MoM from DB (Act ITM current vs previous month) — only for single country; for GLOBAL use aggregated later
         if market != "GLOBAL":
             act_now = get_value(market, month_end, metric, "ITM", "Act")
             act_prev = get_value(market, prev_m, metric, "ITM", "Act")
@@ -497,8 +495,6 @@ def generate_cfo_commentary_enhanced(df_slice: pd.DataFrame, market: str, month_
                     sign = "higher" if mom > 0 else "lower"
                     comments.append(f"{metric} {sign} MoM by {_fmt_delta(mom, unit)} (ITM).")
 
-        # YTD vs PY-YTD
-        ytd_now = itm[itm["basis"] == "Act"].copy()
         ytd_now = sub[(sub["scope"] == "YTD") & (sub["basis"] == "Act")]["value"]
         if not ytd_now.empty and market != "GLOBAL":
             ytd_prev_y = get_value(market, prev_y, metric, "YTD", "Act")
@@ -507,10 +503,95 @@ def generate_cfo_commentary_enhanced(df_slice: pd.DataFrame, market: str, month_
                 if abs(yoy_ytd) >= thr:
                     sign = "up" if yoy_ytd > 0 else "down"
                     comments.append(f"{metric} {sign} versus PY-YTD by {_fmt_delta(yoy_ytd, unit)} (YTD).")
-
-        # 3-month trend (acceleration) — single market only
-        # (GLOBAL trend handled in render_trends aggregation)
     return comments
+
+
+# ----------------------------
+# KPI priorities selector with red/green preview
+# ----------------------------
+def _colored_delta_html(val: Optional[float], unit) -> str:
+    if val is None or pd.isna(val):
+        return f'<span style="color:{GREY}">–</span>'
+    color = DARK_GREEN if float(val) > 0 else RED if float(val) < 0 else GREY
+    return f'<span style="color:{color}; font-weight:600">{_fmt_delta(float(val), unit)}</span>'
+
+def _preview_line(df_slice: pd.DataFrame, metric: str) -> str:
+    sub = df_slice[df_slice["metric"] == metric]
+    if sub.empty:
+        return ""
+    unit = sub["unit"].dropna().iloc[0] if not sub["unit"].dropna().empty else None
+    vbud = sub[(sub["scope"] == "ITM") & (sub["basis"] == "vs BUD")]["value"]
+    vly  = sub[(sub["scope"] == "ITM") & (sub["basis"] == "vs n-1")]["value"]
+    vb = float(vbud.iloc[0]) if not vbud.empty else None
+    vl = float(vly.iloc[0]) if not vly.empty else None
+    return f"<b>{metric}</b> — vs BUD: {_colored_delta_html(vb, unit)} | vs n-1: {_colored_delta_html(vl, unit)}"
+
+def _init_priority_table(metrics: List[str], key: str, default_show: bool):
+    # Keep prior selections if present; otherwise default
+    prev = st.session_state.get(key)
+    df = pd.DataFrame({"metric": metrics}).sort_values("metric")
+    if prev is not None:
+        prev = prev[prev["metric"].isin(metrics)]
+        df = df.merge(prev[["metric","Show"]], on="metric", how="left")
+    df["Show"] = df["Show"].fillna(default_show).astype(bool)
+    st.session_state[key] = df
+    return df
+
+def kpi_priority_selector(df_slice: pd.DataFrame) -> List[str]:
+    st.sidebar.header("KPI Priorities")
+
+    available = sorted(df_slice["metric"].unique().tolist())
+    p1 = [m for m in available if priority_of(m) == "P1"]
+    p2 = [m for m in available if priority_of(m) == "P2"]
+    p3 = [m for m in available if priority_of(m) == "P3"]
+
+    # Initialize tables (defaults: P1 shown; P2/P3 hidden)
+    tbl_p1 = _init_priority_table(p1, "kpi_tbl_P1", True)
+    tbl_p2 = _init_priority_table(p2, "kpi_tbl_P2", False)
+    tbl_p3 = _init_priority_table(p3, "kpi_tbl_P3", False)
+
+    def table_block(title, key, df_tbl):
+        with st.sidebar.expander(title, expanded=(key=="kpi_tbl_P1")):
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Select all", key=key+"_all"):
+                    df_tbl["Show"] = True
+                    st.session_state[key] = df_tbl
+            with c2:
+                if st.button("Clear all", key=key+"_none"):
+                    df_tbl["Show"] = False
+                    st.session_state[key] = df_tbl
+
+            edited = st.data_editor(
+                df_tbl,
+                key=key+"_editor",
+                hide_index=True,
+                column_config={
+                    "metric": st.column_config.TextColumn(disabled=True),
+                    "Show": st.column_config.CheckboxColumn(),
+                },
+                use_container_width=True,
+            )
+            st.session_state[key] = edited
+
+            show_prev = st.checkbox("Show variance preview", value=False, key=key+"_preview")
+            if show_prev:
+                for m in edited["metric"].tolist():
+                    st.markdown(f"- {_preview_line(df_slice, m)}", unsafe_allow_html=True)
+
+    table_block("P1 — Topline / Profit / Cash", "kpi_tbl_P1", st.session_state["kpi_tbl_P1"])
+    table_block("P2 — Efficiency & Spend", "kpi_tbl_P2", st.session_state["kpi_tbl_P2"])
+    table_block("P3 — Operational drivers", "kpi_tbl_P3", st.session_state["kpi_tbl_P3"])
+
+    # Final KPI set = union of all Show==True in P1,P2,P3 (preserve P1→P2→P3 order)
+    kpis = []
+    for key, lst in [("kpi_tbl_P1", p1), ("kpi_tbl_P2", p2), ("kpi_tbl_P3", p3)]:
+        dfk = st.session_state.get(key, pd.DataFrame(columns=["metric","Show"]))
+        chosen = dfk[dfk["Show"]==True]["metric"].tolist()
+        # keep order as in list
+        ordered = [m for m in lst if m in chosen]
+        kpis.extend(ordered)
+    return kpis
 
 
 # ----------------------------
@@ -518,6 +599,9 @@ def generate_cfo_commentary_enhanced(df_slice: pd.DataFrame, market: str, month_
 # ----------------------------
 def render_kpi_cards(df_slice: pd.DataFrame, kpis: List[str]):
     st.subheader("KPIs (Current Month)")
+    if not kpis:
+        st.info("No KPIs selected. Use the sidebar to choose P1/P2/P3 items.")
+        return
     cols = st.columns(len(kpis))
     for i, metric in enumerate(kpis):
         sub = df_slice[df_slice["metric"] == metric]
@@ -593,7 +677,6 @@ def render_trends(markets: List[str], kpis: List[str], engine: str,
                 else:
                     st.line_chart(agg.set_index("month_end")[["value"]])
             else:
-                # Single market trend per metric (first market)
                 mkt = markets[0]
                 hist = get_history(mkt, metric, months=12)
                 if hist.empty:
@@ -610,9 +693,10 @@ def render_commentary_panel(market_label: str, month_end: str, df_slice: pd.Data
                             kpis: List[str], level_thr: float, margin_thr: float):
     st.subheader("Commentary")
 
+    # Auto commentary (kept as before)
     auto_comments = generate_cfo_commentary_enhanced(df_slice, market_label, month_end, level_thr, margin_thr, kpis)
     if auto_comments:
-        st.markdown("**Auto Commentary (generated)**")
+        st.markdown("**Auto Commentary**")
         for c in auto_comments:
             st.write("-", c)
         if st.checkbox("Persist auto commentary to repository", value=False):
@@ -696,19 +780,17 @@ def run_streamlit() -> None:
 
     # Filters
     st.header("Current View")
-    all_markets = get_markets()
-    if not all_markets:
+    # Markets
+    with sqlite3.connect(FINANCE_DB) as conn:
+        markets_all = pd.read_sql("SELECT DISTINCT market FROM financials ORDER BY market", conn)["market"].tolist()
+    if not markets_all:
         st.info("No data yet. Upload a file to begin.")
         return
 
     col_a, col_b = st.columns([2, 2])
     with col_a:
-        markets = st.multiselect(
-            "Markets (multi-select up to 50)",
-            options=all_markets,
-            default=[all_markets[0]],
-            max_selections=50
-        )
+        markets = st.multiselect("Markets (multi-select up to 50)", options=markets_all,
+                                 default=[markets_all[0]], max_selections=50)
     with col_b:
         months = get_months_for_markets(markets) if markets else []
         month_end = st.selectbox("Month", months, index=len(months) - 1 if months else 0)
@@ -717,16 +799,17 @@ def run_streamlit() -> None:
         st.info("Select at least one market and a month.")
         return
 
-    # Sidebar options
+    # Sidebar global/weight options
     st.sidebar.header("Display & Thresholds")
     global_view = st.sidebar.checkbox("Combine selected markets as GLOBAL view", value=(len(markets) > 1))
-
-    # Weighting options for %/rate aggregation
     weight_scope = st.sidebar.selectbox("Weight scope (for %/rate)", ["ITM", "YTD"], index=0)
     weight_basis = st.sidebar.selectbox("Weight basis (for %/rate)", ["Act"], index=0)
     weight_metric = st.sidebar.text_input("Weight metric name", value="Revenue")
+    level_thr = st.sidebar.number_input("Threshold (level metrics)", value=5.0, step=0.5)
+    margin_thr = st.sidebar.number_input("Threshold (margin metrics, pp)", value=0.5, step=0.1)
+    chart_engine = st.sidebar.selectbox("Chart Engine", ["Streamlit", "Plotly"])
 
-    # Build slice
+    # Build slice (single or global)
     if len(markets) == 1 and not global_view:
         df_slice = get_slice(markets[0], month_end)
         market_label = markets[0]
@@ -739,14 +822,8 @@ def run_streamlit() -> None:
         st.warning("No data for this selection.")
         return
 
-    # Sidebar KPI/threshold/chart options
-    available_metrics = sorted(df_slice["metric"].unique().tolist())
-    default_kpis = [m for m in DEFAULT_KPIS if m in available_metrics] or available_metrics[:6]
-    kpis = st.sidebar.multiselect("KPIs to show", options=available_metrics, default=default_kpis)
-
-    level_thr = st.sidebar.number_input("Threshold (level metrics)", value=5.0, step=0.5)
-    margin_thr = st.sidebar.number_input("Threshold (margin metrics, pp)", value=0.5, step=0.1)
-    chart_engine = st.sidebar.selectbox("Chart Engine", ["Streamlit", "Plotly"])
+    # KPI priorities selector → final KPI list
+    kpis = kpi_priority_selector(df_slice)
 
     # Missing actuals banner
     missing = [m for m in kpis if df_slice[(df_slice["metric"] == m) &
