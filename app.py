@@ -941,7 +941,7 @@ def render_downloads(df_slice: pd.DataFrame, market_label: str, month_end: str):
 # Streamlit app
 # ----------------------------
 def run_streamlit() -> None:
-    st.set_page_config(page_title="Finance Dashboard", layout="wide")
+    st.set_page_config(page_title="G5 Country Financial", layout="wide")
     st.title("Finance Dashboard")
     init_dbs()
 
