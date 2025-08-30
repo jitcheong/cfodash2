@@ -666,6 +666,7 @@ def render_changes_panel(df_slice: pd.DataFrame,
         st.info("No data for this selection.")
         return
 
+    # Build base (numeric) frame and filter to selected KPIs
     base = build_changes_df(df_slice, level_thr, margin_thr)
     if kpis:
         base = base[base["metric"].isin(kpis)]
@@ -679,139 +680,57 @@ def render_changes_panel(df_slice: pd.DataFrame,
         st.info("No metrics match this view.")
         return
 
-    def fmt_delta_cell(metric, val, unit):
-        if val is None or pd.isna(val):
-            return f'<span style="color:{GREY}">–</span>'
-        color = color_for_delta(metric, val)
-        return f'<span style="color:{color}; font-weight:600">{_fmt_delta(float(val), unit)}</span>'
+    # Build display strings (no HTML)
+    disp = pd.DataFrame(index=base.index)
+    disp["Metric"]     = base["metric"]
+    disp["ITM Act"]    = [ _fmt_value(v, u) if v is not None else "–"
+                           for v,u in zip(base["act"], base["unit"]) ]
+    disp["vs BUD"]     = [ _fmt_delta(v, u) if v is not None else "–"
+                           for v,u in zip(base["vs_bud"], base["unit"]) ]
+    disp["vs n-1"]     = [ _fmt_delta(v, u) if v is not None else "–"
+                           for v,u in zip(base["vs_ly"], base["unit"]) ]
 
-    def fmt_act_cell(val, unit):
-        if val is None or pd.isna(val):
-            return f'<span style="color:{GREY}">–</span>'
-        return f'<span style="font-weight:600">{_fmt_value(float(val), unit)}</span>'
-
-    show = base.copy()
-    show["ITM Act"]  = [fmt_act_cell(r.act, r.unit) for r in show.itertuples(index=False)]
-    show["vs BUD"]   = [fmt_delta_cell(r.metric, r.vs_bud, r.unit) for r in show.itertuples(index=False)]
-    show["vs n-1"]   = [fmt_delta_cell(r.metric, r.vs_ly, r.unit) for r in show.itertuples(index=False)]
-    have_ytd = show["ytd_vs_bud"].notna().any()
+    have_ytd = base["ytd_vs_bud"].notna().any()
     if have_ytd:
-        show["YTD vs BUD"] = [fmt_delta_cell(r.metric, r.ytd_vs_bud, r.unit) for r in show.itertuples(index=False)]
-    show["Impact"]   = show["impact"].apply(lambda x: f"{x:.1f}×" if x and x != float("inf") else "0.0×")
-    show = show.sort_values("impact", ascending=False)
+        disp["YTD vs BUD"] = [ _fmt_delta(v, u) if v is not None else "–"
+                               for v,u in zip(base["ytd_vs_bud"], base["unit"]) ]
 
-    display_cols = ["metric", "ITM Act", "vs BUD", "vs n-1"] + (["YTD vs BUD"] if have_ytd else []) + ["Impact"]
-    st.dataframe(
-        show[display_cols].rename(columns={"metric": "Metric"}),
-        width="stretch"
-    )
+    disp["Impact"] = base["impact"].apply(lambda x: f"{x:.1f}×")
+    # sort by numeric impact descending
+    disp = disp.loc[base.sort_values("impact", ascending=False).index]
 
-# ----------------------------
-# Trends + Priority charts
-# ----------------------------
-def render_kpi_cards(df_slice: pd.DataFrame, kpis: List[str]):
-    st.subheader("KPIs (Current Month)")
-    if not kpis:
-        st.info("No KPIs selected. Use the sidebar to choose P1/P2/P3 items.")
-        return
-    cols = st.columns(len(kpis))
-    for i, metric in enumerate(kpis):
-        sub = df_slice[df_slice["metric"] == metric]
-        if sub.empty:
-            with cols[i]:
-                st.metric(metric, value="-", delta=None)
-            continue
-        unit = sub["unit"].dropna().iloc[0] if not sub["unit"].dropna().empty else None
-        act = sub[(sub["scope"] == "ITM") & (sub["basis"] == "Act")]["value"]
-        bud = sub[(sub["scope"] == "ITM") & (sub["basis"] == "vs BUD")]["value"]
-        ly  = sub[(sub["scope"] == "ITM") & (sub["basis"] == "vs n-1")]["value"]
-        act_val = act.iloc[0] if not act.empty else None
-        bud_delta = _fmt_delta(float(bud.iloc[0]), unit) if not bud.empty else None
-        ly_delta  = _fmt_delta(float(ly.iloc[0]), unit) if not ly.empty else None
-        delta_str = " | ".join([x for x in [f"vs BUD: {bud_delta}" if bud_delta else None,
-                                            f"vs n-1: {ly_delta}" if ly_delta else None] if x]) or None
-        with cols[i]:
-            st.metric(metric, value=_fmt_value(act_val, unit), delta=delta_str)
-
-def render_trends(markets: List[str], kpis: List[str], engine: str,
-                  weight_metric: Optional[str], weight_scope: str, weight_basis: str,
-                  global_view: bool):
-    with st.expander("Trends (last 12 months)", expanded=False):
-        if engine == "Plotly":
-            try:
-                import plotly.express as px
-            except Exception:
-                st.error("Plotly not installed. Run: pip install plotly")
-                return
-        for metric in kpis:
-            if global_view and len(markets) > 1:
-                agg = aggregate_history(markets, metric, weight_metric, weight_scope, weight_basis)
-                if agg.empty:
-                    continue
-                agg["month_end"] = pd.to_datetime(agg["month_end"])
-                st.caption(f"{metric} — GLOBAL")
-                if engine == "Plotly":
-                    fig = px.line(agg, x="month_end", y="value")
-                    st.plotly_chart(fig, use_container_width=True)
+    # Styler helpers that color by metric + delta (DSO lower = green)
+    def style_delta(col_name: str, num_col: str):
+        def _styler(col: pd.Series):
+            styles = []
+            # align to disp index (same as base after sort above)
+            for idx in col.index:
+                metric = base.loc[idx, "metric"]
+                val    = base.loc[idx, num_col]
+                if val is None or pd.isna(val):
+                    styles.append(f"color: {GREY}")
                 else:
-                    st.line_chart(agg.set_index("month_end")[["value"]])
-            else:
-                mkt = markets[0]
-                hist = get_history(mkt, metric, months=12)
-                if hist.empty:
-                    continue
-                hist["month_end"] = pd.to_datetime(hist["month_end"])
-                st.caption(f"{metric} — {mkt}")
-                if engine == "Plotly":
-                    fig = px.line(hist, x="month_end", y="value")
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.line_chart(hist.set_index("month_end")[["value"]])
+                    styles.append(f"color: {color_for_delta(metric, val)}; font-weight: 600")
+            return styles
+        return _styler
 
-def render_priority_charts(markets: List[str],
-                           engine: str,
-                           weight_metric: Optional[str],
-                           weight_scope: str,
-                           weight_basis: str,
-                           global_view: bool):
-    try:
-        import plotly.express as px
-        have_plotly = True
-    except Exception:
-        have_plotly = False
+    styler = (disp.style
+              .apply(style_delta("vs BUD", "vs_bud"), subset=["vs BUD"])
+              .apply(style_delta("vs n-1", "vs_ly"), subset=["vs n-1"])
+             )
 
-    def _series(metric: str):
-        if global_view and len(markets) > 1:
-            data = aggregate_history(markets, metric, weight_metric, weight_scope, weight_basis)
-            title_suffix = " — GLOBAL"
-        else:
-            mkt = markets[0]
-            data = get_history(mkt, metric, months=12)
-            title_suffix = f" — {mkt}"
-        return data, title_suffix
+    if have_ytd:
+        styler = styler.apply(style_delta("YTD vs BUD", "ytd_vs_bud"), subset=["YTD vs BUD"])
 
-    def _chart(metric: str):
-        data, suffix = _series(metric)
-        if data is None or data.empty:
-            return
-        data["month_end"] = pd.to_datetime(data["month_end"])
-        st.caption(f"{metric}{suffix}")
-        if engine == "Plotly" and have_plotly:
-            fig = px.line(data, x="month_end", y="value")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.line_chart(data.set_index("month_end")[["value"]])
+    # Bold ITM Act, align numbers to the right columns
+    right_cols = [c for c in disp.columns if c != "Metric"]
+    styler = (styler
+              .set_properties(subset=["ITM Act"], **{"font-weight": "600"})
+              .set_properties(subset=right_cols, **{"text-align": "right"})
+             )
 
-    p2 = st.session_state.get("selected_P2", [])
-    if p2:
-        st.subheader("P2 KPI Charts")
-        for m in p2:
-            _chart(m)
-    p3 = st.session_state.get("selected_P3", [])
-    if p3:
-        st.subheader("P3 KPI Charts")
-        for m in p3:
-            _chart(m)
+    # Render (styler is supported by st.dataframe)
+    st.dataframe(styler, hide_index=True, width="stretch")
 
 # ----------------------------
 # Commentary panel
