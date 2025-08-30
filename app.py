@@ -1,6 +1,6 @@
 # app.py
 # Requirements: pandas>=2.2, streamlit>=1.36, openpyxl>=3.1.2
-# Optional for charts: plotly>=5
+# Optional charts: plotly>=5
 import argparse
 import os
 import re
@@ -16,12 +16,12 @@ from pandas.tseries.offsets import MonthEnd, DateOffset
 FINANCE_DB = "finance.db"
 COMMENTARY_DB = "commentary.db"
 
-# Default “suggested” KPIs for initial picks; actual availability comes from data
+# Default KPI suggestions; actual availability comes from data
 DEFAULT_KPIS = ["Revenue", "GM%", "EBITDA%", "Opex%", "DSO", "Capex"]
-MARGIN_HINTS = {"GM%", "EBITDA%", "Opex%"}           # treat these as margin-like
-MARGIN_UNITS = {"%", "pts", "pt"}                    # if unit matches, treat as margin-like
+MARGIN_HINTS = {"GM%", "EBITDA%", "Opex%"}           # treat as margin-like
+MARGIN_UNITS = {"%", "pts", "pt"}                    # treat as margin-like
 
-# Priority rules (regex → P1/P2; everything else falls into P3)
+# Priority rules (regex → P1/P2; everything else becomes P3)
 PRIORITY_RULES = [
     (re.compile(r'^(revenue|sales|net\s*revenue)$', re.I), "P1"),
     (re.compile(r'^(gross\s*margin(\s*%)?|gm%?|gm$)', re.I), "P1"),
@@ -45,6 +45,7 @@ def priority_of(metric: str) -> str:
 DARK_GREEN = "#006400"
 RED = "#C00000"
 GREY = "#9CA3AF"
+
 
 # ----------------------------
 # DB init & schema evolve
@@ -88,6 +89,7 @@ def init_dbs() -> None:
             )
             """
         )
+        # evolve: ensure accepted exists
         cols = pd.read_sql("PRAGMA table_info(commentary);", conn)
         if "accepted" not in cols["name"].tolist():
             conn.execute("ALTER TABLE commentary ADD COLUMN accepted INTEGER DEFAULT 0")
@@ -325,8 +327,7 @@ def aggregate_slice(df: pd.DataFrame,
         weights = df[(df["metric"] == weight_metric) &
                      (df["scope"] == weight_scope) &
                      (df["basis"] == weight_basis)][["market", "value"]]
-        weights = weights.rename(columns={"value": "w"})
-        weights = weights.set_index("market")["w"]
+        weights = weights.rename(columns={"value": "w"}).set_index("market")["w"]
 
     out = []
     for (metric, unit, scope, basis), g in df.groupby(["metric","unit","scope","basis"], dropna=False):
@@ -365,12 +366,10 @@ def aggregate_history(markets: List[str],
 
     is_margin = (metric in MARGIN_HINTS) or metric.endswith("%")
     if not is_margin:
-        agg = raw.groupby("month_end", as_index=False)["value"].sum()
-        return agg
+        return raw.groupby("month_end", as_index=False)["value"].sum()
 
     if not weight_metric:
-        agg = raw.groupby("month_end", as_index=False)["value"].mean()
-        return agg
+        return raw.groupby("month_end", as_index=False)["value"].mean()
 
     ph = ",".join(["?"] * len(markets))
     with sqlite3.connect(FINANCE_DB) as conn:
@@ -395,7 +394,7 @@ def aggregate_history(markets: List[str],
 
 
 # ----------------------------
-# Commentary (unchanged core)
+# Commentary
 # ----------------------------
 def validate_commentary(text: str, metric: str) -> Tuple[float, bool]:
     coverage = 100 if metric.lower() in text.lower() else 50
@@ -443,7 +442,7 @@ def save_commentary_edits(df_edit: pd.DataFrame) -> None:
 
 
 # ----------------------------
-# Auto commentary (existing enhanced version is kept)
+# Auto commentary (kept as before)
 # ----------------------------
 def get_value(market: str, month_end: str, metric: str, scope: str, basis: str) -> Optional[float]:
     with sqlite3.connect(FINANCE_DB) as conn:
@@ -507,7 +506,7 @@ def generate_cfo_commentary_enhanced(df_slice: pd.DataFrame, market: str, month_
 
 
 # ----------------------------
-# KPI priorities selector with red/green preview
+# KPI priorities selector (robust, with red/green preview)
 # ----------------------------
 def _colored_delta_html(val: Optional[float], unit) -> str:
     if val is None or pd.isna(val):
@@ -526,14 +525,18 @@ def _preview_line(df_slice: pd.DataFrame, metric: str) -> str:
     vl = float(vly.iloc[0]) if not vly.empty else None
     return f"<b>{metric}</b> — vs BUD: {_colored_delta_html(vb, unit)} | vs n-1: {_colored_delta_html(vl, unit)}"
 
-def _init_priority_table(metrics: List[str], key: str, default_show: bool):
-    # Keep prior selections if present; otherwise default
+def _init_priority_table(metrics: List[str], key: str, default_show: bool) -> pd.DataFrame:
+    # Always start with both columns present
+    df = pd.DataFrame({"metric": sorted(metrics), "Show": default_show})
+    df["Show"] = df["Show"].astype(bool)
+
+    # Overlay prior selections if present & valid
     prev = st.session_state.get(key)
-    df = pd.DataFrame({"metric": metrics}).sort_values("metric")
-    if prev is not None:
+    if isinstance(prev, pd.DataFrame) and {"metric", "Show"}.issubset(prev.columns):
         prev = prev[prev["metric"].isin(metrics)]
-        df = df.merge(prev[["metric","Show"]], on="metric", how="left")
-    df["Show"] = df["Show"].fillna(default_show).astype(bool)
+        prev_map = dict(zip(prev["metric"], prev["Show"].astype(bool)))
+        df["Show"] = df["metric"].map(prev_map).fillna(default_show).astype(bool)
+
     st.session_state[key] = df
     return df
 
@@ -551,7 +554,7 @@ def kpi_priority_selector(df_slice: pd.DataFrame) -> List[str]:
     tbl_p3 = _init_priority_table(p3, "kpi_tbl_P3", False)
 
     def table_block(title, key, df_tbl):
-        with st.sidebar.expander(title, expanded=(key=="kpi_tbl_P1")):
+        with st.sidebar.expander(title, expanded=(key == "kpi_tbl_P1")):
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("Select all", key=key+"_all"):
@@ -563,32 +566,38 @@ def kpi_priority_selector(df_slice: pd.DataFrame) -> List[str]:
                     st.session_state[key] = df_tbl
 
             edited = st.data_editor(
-                df_tbl,
+                st.session_state[key],
                 key=key+"_editor",
                 hide_index=True,
                 column_config={
                     "metric": st.column_config.TextColumn(disabled=True),
                     "Show": st.column_config.CheckboxColumn(),
                 },
-                use_container_width=True,
+                width="stretch",
             )
+            # Safety: ensure Show exists & boolean
+            if "Show" not in edited.columns:
+                edited["Show"] = False
+            edited["Show"] = edited["Show"].astype(bool)
             st.session_state[key] = edited
 
             show_prev = st.checkbox("Show variance preview", value=False, key=key+"_preview")
             if show_prev:
-                for m in edited["metric"].tolist():
-                    st.markdown(f"- {_preview_line(df_slice, m)}", unsafe_allow_html=True)
+                if edited.empty:
+                    st.markdown("*No metrics available.*")
+                else:
+                    for m in edited["metric"].tolist():
+                        st.markdown(f"- {_preview_line(df_slice, m)}", unsafe_allow_html=True)
 
-    table_block("P1 — Topline / Profit / Cash", "kpi_tbl_P1", st.session_state["kpi_tbl_P1"])
-    table_block("P2 — Efficiency & Spend", "kpi_tbl_P2", st.session_state["kpi_tbl_P2"])
-    table_block("P3 — Operational drivers", "kpi_tbl_P3", st.session_state["kpi_tbl_P3"])
+    table_block("P1 — Topline / Profit / Cash", "kpi_tbl_P1", tbl_p1)
+    table_block("P2 — Efficiency & Spend", "kpi_tbl_P2", tbl_p2)
+    table_block("P3 — Operational drivers", "kpi_tbl_P3", tbl_p3)
 
-    # Final KPI set = union of all Show==True in P1,P2,P3 (preserve P1→P2→P3 order)
+    # Final KPI set = union of all Show==True in P1,P2,P3 (preserve priority order)
     kpis = []
     for key, lst in [("kpi_tbl_P1", p1), ("kpi_tbl_P2", p2), ("kpi_tbl_P3", p3)]:
-        dfk = st.session_state.get(key, pd.DataFrame(columns=["metric","Show"]))
-        chosen = dfk[dfk["Show"]==True]["metric"].tolist()
-        # keep order as in list
+        dfk = st.session_state.get(key)
+        chosen = dfk.loc[dfk["Show"] == True, "metric"].tolist() if isinstance(dfk, pd.DataFrame) and "Show" in dfk.columns else []
         ordered = [m for m in lst if m in chosen]
         kpis.extend(ordered)
     return kpis
@@ -649,7 +658,7 @@ def render_changes_panel(df_slice: pd.DataFrame, kpis: List[str], level_thr: flo
                 })
     if rows:
         changed = pd.DataFrame(rows).sort_values(by="abs", ascending=False).drop(columns=["abs"])
-        st.dataframe(changed, use_container_width=True)
+        st.dataframe(changed, width="stretch")
     else:
         st.info("No significant changes for the selected KPIs and thresholds.")
 
@@ -693,7 +702,7 @@ def render_commentary_panel(market_label: str, month_end: str, df_slice: pd.Data
                             kpis: List[str], level_thr: float, margin_thr: float):
     st.subheader("Commentary")
 
-    # Auto commentary (kept as before)
+    # Auto commentary (as before)
     auto_comments = generate_cfo_commentary_enhanced(df_slice, market_label, month_end, level_thr, margin_thr, kpis)
     if auto_comments:
         st.markdown("**Auto Commentary**")
@@ -724,12 +733,12 @@ def render_commentary_panel(market_label: str, month_end: str, df_slice: pd.Data
         edited = st.data_editor(
             saved,
             num_rows="dynamic",
-            use_container_width=True,
             column_config={
                 "id": st.column_config.NumberColumn(disabled=True),
                 "passed": st.column_config.CheckboxColumn(),
                 "accepted": st.column_config.CheckboxColumn()
-            }
+            },
+            width="stretch",
         )
         if st.button("Apply Changes"):
             save_commentary_edits(edited)
@@ -780,9 +789,7 @@ def run_streamlit() -> None:
 
     # Filters
     st.header("Current View")
-    # Markets
-    with sqlite3.connect(FINANCE_DB) as conn:
-        markets_all = pd.read_sql("SELECT DISTINCT market FROM financials ORDER BY market", conn)["market"].tolist()
+    markets_all = get_markets()
     if not markets_all:
         st.info("No data yet. Upload a file to begin.")
         return
