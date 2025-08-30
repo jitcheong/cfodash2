@@ -171,6 +171,77 @@ def color_for_delta(metric: str, delta: Optional[float]) -> str:
         return DARK_GREEN if d < 0 else RED if d > 0 else GREY
     else:
         return DARK_GREEN if d > 0 else RED if d < 0 else GREY
+def _safe_pct(diff: Optional[float], base: Optional[float]) -> Optional[float]:
+    if diff is None or pd.isna(diff) or base is None or pd.isna(base) or base == 0:
+        return None
+    return 100.0 * float(diff) / float(base)
+
+def _metric_snapshot(df_slice: pd.DataFrame, metric: str):
+    """Return dict of act, vs_bud, vs_ly, ytd_act, ytd_vs_bud, unit and formatted strings."""
+    sub = df_slice[df_slice["metric"] == metric]
+    if sub.empty:
+        return {}
+    unit = sub["unit"].dropna().iloc[0] if not sub["unit"].dropna().empty else None
+    act = sub[(sub["scope"] == "ITM") & (sub["basis"] == "Act")]["value"]
+    bud = sub[(sub["scope"] == "ITM") & (sub["basis"] == "vs BUD")]["value"]
+    ly  = sub[(sub["scope"] == "ITM") & (sub["basis"] == "vs n-1")]["value"]
+    ytd_act = sub[(sub["scope"] == "YTD") & (sub["basis"] == "Act")]["value"]
+    ytd_bud = sub[(sub["scope"] == "YTD") & (sub["basis"] == "vs BUD")]["value"]
+
+    act_v = float(act.iloc[0]) if not act.empty else None
+    bud_v = float(bud.iloc[0]) if not bud.empty else None
+    ly_v  = float(ly.iloc[0])  if not ly.empty  else None
+    ytd_act_v = float(ytd_act.iloc[0]) if not ytd_act.empty else None
+    ytd_bud_v = float(ytd_bud.iloc[0]) if not ytd_bud.empty else None
+
+    # Reconstruct baselines: Budget = Act - (Act-Bud), LY = Act - (Act-LY)
+    budget_base = act_v - bud_v if (act_v is not None and bud_v is not None) else None
+    ly_base     = act_v - ly_v  if (act_v is not None and ly_v  is not None) else None
+    ytd_budget_base = ytd_act_v - ytd_bud_v if (ytd_act_v is not None and ytd_bud_v is not None) else None
+
+    return {
+        "unit": unit,
+        "act": act_v,
+        "vs_bud": bud_v,
+        "vs_ly": ly_v,
+        "ytd_act": ytd_act_v,
+        "ytd_vs_bud": ytd_bud_v,
+        "budget_base": budget_base,
+        "ly_base": ly_base,
+        "ytd_budget_base": ytd_budget_base,
+        # formatted strings
+        "act_fmt": _fmt_value(act_v, unit),
+        "vs_bud_fmt": _fmt_delta(bud_v, unit) if bud_v is not None else None,
+        "vs_ly_fmt": _fmt_delta(ly_v, unit) if ly_v is not None else None,
+        "ytd_vs_bud_fmt": _fmt_delta(ytd_bud_v, unit) if ytd_bud_v is not None else None,
+    }
+
+def build_deviation_table(df_slice: pd.DataFrame, metrics: List[str]) -> pd.DataFrame:
+    """
+    Returns a table with % deviations vs Budget, vs LY, YTD vs BUD for each metric.
+    % = delta / baseline reconstructed from Act and delta.
+    """
+    rows = []
+    for m in metrics:
+        snap = _metric_snapshot(df_slice, m)
+        if not snap:
+            continue
+        pct_bud = _safe_pct(snap["vs_bud"], snap["budget_base"])
+        pct_ly  = _safe_pct(snap["vs_ly"], snap["ly_base"])
+        pct_ytd = _safe_pct(snap["ytd_vs_bud"], snap["ytd_budget_base"])
+        # For coloring we use the original deltas (business-sense for DSO)
+        rows.append({
+            "metric": m,
+            "unit": snap["unit"],
+            "pct_vs_bud": pct_bud,
+            "pct_vs_ly": pct_ly,
+            "pct_ytd_vs_bud": pct_ytd,
+            "delta_vs_bud": snap["vs_bud"],
+            "delta_vs_ly": snap["vs_ly"],
+            "delta_ytd_vs_bud": snap["ytd_vs_bud"],
+            "max_abs_pct": max([abs(x) for x in [pct_bud, pct_ly, pct_ytd] if x is not None], default=None),
+        })
+    return pd.DataFrame(rows)
 
 
 # ----------------------------
@@ -866,16 +937,18 @@ def render_priority_charts(markets: List[str],
 # ----------------------------
 # Commentary panel
 # ----------------------------
-def render_commentary_panel(market_label: str, month_end: str, df_slice: pd.DataFrame,
-                            kpis: List[str], level_thr: float, margin_thr: float):
+def render_commentary_panel(markets: List[str], market_label: str, month_end: str,
+                            df_slice: pd.DataFrame, kpis: List[str],
+                            level_thr: float, margin_thr: float, global_view: bool):
     st.subheader("Commentary")
 
+    # ---- Auto commentary (unchanged behavior) ----
     auto_comments = generate_cfo_commentary_enhanced(df_slice, market_label, month_end, level_thr, margin_thr, kpis)
     if auto_comments:
         st.markdown("**Auto Commentary**")
         for c in auto_comments:
             st.write("-", c)
-        if st.checkbox("Persist auto commentary to repository", value=False):
+        if st.checkbox("Persist auto commentary", value=False):
             if st.button("Save Auto Commentary"):
                 for c in auto_comments:
                     metric = next((m for m in kpis if m.lower() in c.lower()), "General")
@@ -885,33 +958,140 @@ def render_commentary_panel(market_label: str, month_end: str, df_slice: pd.Data
 
     st.markdown("---")
     st.markdown("**Add Manual Commentary**")
-    metric = st.selectbox("Metric", kpis, key="manual_metric")
-    text = st.text_area("Commentary", key="manual_text")
-    author = st.text_input("Author", key="manual_author", value="")
-    if st.button("Submit Commentary"):
-        score, passed = validate_commentary(text, metric)
-        store_commentary(market_label, month_end, metric, text, author or "User", score, passed, accepted=0)
-        st.success(f"Saved. Score: {score:.1f} — Pass: {passed}")
+
+    # ---- Deviation monitor & threshold ----
+    st.caption("Explain large deviations (default threshold 10%). Adjust below if needed.")
+    deviation_threshold = st.number_input("Deviation threshold (%)", value=10.0, step=0.5, min_value=0.0, key="dev_threshold")
+
+    # Build deviation table on current KPI selection (or all metrics if none picked)
+    metrics_for_monitor = kpis if kpis else sorted(df_slice["metric"].unique().tolist())
+    dev = build_deviation_table(df_slice, metrics_for_monitor)
+
+    if not dev.empty:
+        # Flagged metrics = any % deviation above threshold (absolute)
+        dev["flagged"] = dev["max_abs_pct"].apply(lambda x: (abs(x) >= deviation_threshold) if x is not None else False)
+
+        # Styled view
+        disp = dev.copy()
+        disp = disp[["metric", "pct_vs_bud", "pct_vs_ly", "pct_ytd_vs_bud", "max_abs_pct", "flagged"]]
+        disp = disp.rename(columns={
+            "metric": "Metric",
+            "pct_vs_bud": "vs BUD (%)",
+            "pct_vs_ly": "vs LY (%)",
+            "pct_ytd_vs_bud": "YTD vs BUD (%)",
+            "max_abs_pct": "Max |%|",
+            "flagged": "Needs explanation"
+        })
+
+        def _fmt_pct(x):
+            return "-" if x is None or pd.isna(x) else f"{x:.1f}%"
+
+        for c in ["vs BUD (%)", "vs LY (%)", "YTD vs BUD (%)", "Max |%|"]:
+            disp[c] = disp[c].apply(_fmt_pct)
+
+        # Color by sign using original deltas so DSO green=decrease
+        def style_pct(col_name: str, delta_col: str):
+            def _styler(col: pd.Series):
+                styles = []
+                for idx in col.index:
+                    m = dev.loc[dev.index[idx], "metric"]
+                    d = dev.loc[dev.index[idx], delta_col]
+                    styles.append(f"color: {color_for_delta(m, d)}; font-weight: 600" if d is not None else f"color:{GREY}")
+                return styles
+            return _styler
+
+        styler = (disp.style
+                  .apply(style_pct("vs BUD (%)", "delta_vs_bud"), subset=["vs BUD (%)"])
+                  .apply(style_pct("vs LY (%)", "delta_vs_ly"), subset=["vs LY (%)"])
+                  .apply(style_pct("YTD vs BUD (%)", "delta_ytd_vs_bud"), subset=["YTD vs BUD (%)"])
+                 )
+        st.dataframe(styler, hide_index=True, width="stretch")
+
+        required = set(dev.loc[dev["flagged"], "metric"].tolist())
+    else:
+        required = set()
+
+    if required:
+        st.warning("Explanation required for: " + ", ".join(sorted(required)))
+        if st.button("Select all required metrics"):
+            st.session_state["manual_metrics"] = list(sorted(required))
+
+    # ---- Tagging + templates ----
+    selectable_metrics = ["General"] + (kpis if kpis else sorted(df_slice["metric"].unique().tolist()))
+    chosen_metrics = st.multiselect("Attach to metric(s)", options=selectable_metrics,
+                                    default=(list(sorted(required)) if required else ["General"]),
+                                    max_selections=10, key="manual_metrics")
+
+    # To power templates with numbers, let user choose one metric context
+    template_metric = st.selectbox("Template metric (for numbers)", options=(kpis if kpis else selectable_metrics[1:]) or ["(none)"])
+    template_name = st.selectbox("Template", options=list(COMMENT_TEMPLATES.keys()))
+    if st.button("Apply template"):
+        if template_metric and template_metric != "(none)":
+            snap = _metric_snapshot(df_slice, template_metric)
+            txt = _fill_template(template_name, template_metric, snap) or ""
+            st.session_state["manual_text"] = txt
+        else:
+            st.warning("Select a metric to source numbers from.")
+
+    text = st.text_area("Commentary", key="manual_text", value=st.session_state.get("manual_text", ""), height=120)
+    author = st.text_input("Author", key="manual_author", value=st.session_state.get("manual_author",""))
+
+    # Live validation (use first specific metric if any)
+    metric_for_score = next((m for m in chosen_metrics if m != "General"), "General")
+    score, passed = validate_commentary(text, metric_for_score)
+    st.caption(f"Score: **{score:.1f}** — {'Pass' if passed else 'Needs work'}")
+
+    # Save scope
+    save_targets = [(market_label,)]
+    if global_view and len(markets) > 1:
+        tgt = st.radio("Save for", options=["GLOBAL only", "Each selected market"], horizontal=True)
+        save_targets = [(market_label,)] if tgt == "GLOBAL only" else [(m,) for m in markets]
+
+    # Gate: ensure all required metrics are covered by tags
+    missing_explanations = sorted(list(required - set([m for m in chosen_metrics if m != "General"])))
+    if required and missing_explanations:
+        st.error("You must tag commentary for these metrics before saving: " + ", ".join(missing_explanations))
+
+    cols = st.columns(2)
+    with cols[0]:
+        if st.button("Save (Pending)"):
+            if not text.strip():
+                st.warning("Commentary text is empty.")
+            elif required and missing_explanations:
+                st.warning("Please include all required metrics in the tags.")
+            else:
+                for (mkt,) in save_targets:
+                    for met in (chosen_metrics or ["General"]):
+                        s, p = validate_commentary(text, met if met != "General" else "")
+                        store_commentary(mkt, month_end, met, text, author or "User", s, p, accepted=0)
+                st.success("Saved as pending.")
+    with cols[1]:
+        if st.button("Save & Accept"):
+            if not text.strip():
+                st.warning("Commentary text is empty.")
+            elif required and missing_explanations:
+                st.warning("Please include all required metrics in the tags.")
+            else:
+                for (mkt,) in save_targets:
+                    for met in (chosen_metrics or ["General"]):
+                        s, p = validate_commentary(text, met if met != "General" else "")
+                        store_commentary(mkt, month_end, met, text, author or "User", s, p, accepted=1)
+                st.success("Saved and accepted.")
 
     st.markdown("---")
     st.markdown("**Commentary Manager (edit / accept / reject)**")
     saved = load_commentary(market_label, month_end)
     if not saved.empty:
-        edited = st.data_editor(
-            saved,
-            num_rows="dynamic",
-            column_config={
-                "id": st.column_config.NumberColumn(disabled=True),
-                "passed": st.column_config.CheckboxColumn(),
-                "accepted": st.column_config.CheckboxColumn()
-            },
-            width="stretch",
-        )
+        edited = st.data_editor(saved, num_rows="dynamic",
+                                column_config={"id": st.column_config.NumberColumn(disabled=True),
+                                               "passed": st.column_config.CheckboxColumn(),
+                                               "accepted": st.column_config.CheckboxColumn()},
+                                width="stretch")
         if st.button("Apply Changes"):
-            save_commentary_edits(edited)
-            st.success("Commentary updated.")
+            save_commentary_edits(edited); st.success("Commentary updated.")
     else:
         st.info("No saved commentary yet for this selection.")
+
 
 
 # ----------------------------
