@@ -739,7 +739,6 @@ def render_changes_panel(df_slice: pd.DataFrame,
 
     st.dataframe(styler, hide_index=True, use_container_width=True)
 
-# ----------------------------
 # KPI tiles, Trends, Priority charts
 # ----------------------------
 def render_kpi_cards(df_slice: pd.DataFrame, kpis: List[str]):
@@ -770,37 +769,45 @@ def render_trends(markets: List[str], kpis: List[str], engine: str,
                   weight_metric: Optional[str], weight_scope: str, weight_basis: str,
                   global_view: bool):
     with st.expander("Trends (last 12 months)", expanded=False):
-        if engine == "Plotly":
+        use_plotly = (engine == "Plotly")
+        if use_plotly:
             try:
                 import plotly.express as px
             except Exception:
                 st.error("Plotly not installed. Run: pip install plotly")
-                return
+                use_plotly = False
+
         for metric in kpis:
+            # Pull series
             if global_view and len(markets) > 1:
-                agg = aggregate_history(markets, metric, weight_metric, weight_scope, weight_basis)
-                if agg.empty:
-                    continue
-                agg["month_end"] = pd.to_datetime(agg["month_end"])
-                st.caption(f"{metric} — GLOBAL")
-                if engine == "Plotly":
-                    fig = px.line(agg, x="month_end", y="value")
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.line_chart(agg.set_index("month_end")[["value"]])
+                data = aggregate_history(markets, metric, weight_metric, weight_scope, weight_basis)
+                subtitle = "GLOBAL"
             else:
                 mkt = markets[0]
-                hist = get_history(mkt, metric, months=12)
-                if hist.empty:
-                    continue
-                hist["month_end"] = pd.to_datetime(hist["month_end"])
-                st.caption(f"{metric} — {mkt}")
-                if engine == "Plotly":
-                    import plotly.express as px
-                    fig = px.line(hist, x="month_end", y="value")
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.line_chart(hist.set_index("month_end")[["value"]])
+                data = get_history(mkt, metric, months=12)
+                subtitle = mkt
+
+            if data is None or data.empty:
+                continue
+
+            # Ensure datetime, order by month
+            data = data.copy()
+            data["month_end"] = pd.to_datetime(data["month_end"])
+            data = data.sort_values("month_end")
+
+            st.caption(f"{metric} — {subtitle}")
+            if use_plotly:
+                fig = px.bar(data, x="month_end", y="value")
+                fig.update_layout(
+                    xaxis_title=None,
+                    yaxis_title=None,
+                    bargap=0.1,
+                    margin=dict(l=10, r=10, t=10, b=10),
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                # Streamlit fallback
+                st.bar_chart(data.set_index("month_end")[["value"]])
 
 def render_priority_charts(markets: List[str],
                            engine: str,
@@ -808,11 +815,12 @@ def render_priority_charts(markets: List[str],
                            weight_scope: str,
                            weight_basis: str,
                            global_view: bool):
-    try:
-        import plotly.express as px
-        have_plotly = True
-    except Exception:
-        have_plotly = False
+    use_plotly = (engine == "Plotly")
+    if use_plotly:
+        try:
+            import plotly.express as px
+        except Exception:
+            use_plotly = False
 
     def _series(metric: str):
         if global_view and len(markets) > 1:
@@ -828,19 +836,28 @@ def render_priority_charts(markets: List[str],
         data, suffix = _series(metric)
         if data is None or data.empty:
             return
+        data = data.copy()
         data["month_end"] = pd.to_datetime(data["month_end"])
+        data = data.sort_values("month_end")
         st.caption(f"{metric}{suffix}")
-        if engine == "Plotly" and have_plotly:
-            fig = px.line(data, x="month_end", y="value")
+        if use_plotly:
+            fig = px.bar(data, x="month_end", y="value")
+            fig.update_layout(
+                xaxis_title=None,
+                yaxis_title=None,
+                bargap=0.1,
+                margin=dict(l=10, r=10, t=10, b=10),
+            )
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.line_chart(data.set_index("month_end")[["value"]])
+            st.bar_chart(data.set_index("month_end")[["value"]])
 
     p2 = st.session_state.get("selected_P2", [])
     if p2:
         st.subheader("P2 KPI Charts")
         for m in p2:
             _chart(m)
+
     p3 = st.session_state.get("selected_P3", [])
     if p3:
         st.subheader("P3 KPI Charts")
