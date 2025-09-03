@@ -13,6 +13,14 @@ import pandas as pd
 import streamlit as st
 from pandas.tseries.offsets import MonthEnd, DateOffset
 
+#JC addition
+data = {
+    "DSO": ["site1", "site2", "site3"],
+    "EBITA": ["site1", "site2", "site3"],
+    "Gross Margin": ["site1", "site2", "site3"],
+    "Revenue": ["site1", "site2", "site3"]
+    }
+
 FINANCE_DB = "finance.db"
 COMMENTARY_DB = "commentary.db"
 
@@ -1045,6 +1053,10 @@ def render_commentary_panel(markets: List[str], market_label: str, month_end: st
 
     template_metric = st.selectbox("Template metric (for numbers)",
                                    options=(kpis if kpis else selectable_metrics[1:]) or ["(none)"])
+
+    #JC
+    template_metric2 = st.selectbox("Sites", options=data.get(template_metric, ["(none)"]))
+                                
     template_name = st.selectbox("Template", options=list(COMMENT_TEMPLATES.keys()))
     if st.button("Apply template"):
         if template_metric and template_metric != "(none)":
