@@ -16,7 +16,7 @@ from pandas.tseries.offsets import MonthEnd, DateOffset
 #JC addition
 data = {
     "DSO": ["site1", "site2", "site3"],
-    "EBITA": ["site4", "site5", "site6"],
+    "EBITDA": ["ssite4", "site5", "site6"],
     "Gross Margin": ["site7", "site8", "site9"],
     "Revenue": ["site10", "site11", "site12"]
     }
