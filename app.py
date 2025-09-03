@@ -15,10 +15,10 @@ from pandas.tseries.offsets import MonthEnd, DateOffset
 
 #JC
 data = {
-    "DSO": ["site1", "site2", "site3"],
-    "EBITDA": ["ssite4", "site5", "site6"],
-    "Gross Margin": ["site7", "site8", "site9"],
-    "Revenue": ["site10", "site11", "site12"]
+    "DSO": ["SiteD1", "SiteD2", "SiteD3"],
+    "EBITDA": ["SiteE1", "SiteE2", "SiteE3"],
+    "Gross Margin": ["SiteG1", "SiteG2", "SiteG3"],
+    "Revenue": ["SiteR1", "SiteR2", "SiteR3"]
     }
 
 FINANCE_DB = "finance.db"
