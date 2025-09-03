@@ -13,7 +13,7 @@ import pandas as pd
 import streamlit as st
 from pandas.tseries.offsets import MonthEnd, DateOffset
 
-#JC addition
+#JC
 data = {
     "DSO": ["site1", "site2", "site3"],
     "EBITDA": ["ssite4", "site5", "site6"],
